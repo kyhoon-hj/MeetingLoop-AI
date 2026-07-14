@@ -1,0 +1,18 @@
+{
+  "name": "@meetingloop/web",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "next dev --hostname 127.0.0.1 --port 3000",
+    "build": "next build",
+    "start": "next start --hostname 127.0.0.1 --port 3000"
+  },
+  "dependencies": {
+    "@meetingloop/ai": "workspace:*",
+    "@meetingloop/auth": "workspace:*",
+    "@meetingloop/db": "workspace:*",
+    "@meetingloop/domain": "workspace:*",
+    "@meetingloop/ui": "workspace:*"
+  }
+}

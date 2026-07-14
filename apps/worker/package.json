@@ -1,0 +1,17 @@
+{
+  "name": "@meetingloop/worker",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx src/index.ts",
+    "build": "tsc -b"
+  },
+  "dependencies": {
+    "@meetingloop/ai": "workspace:*",
+    "@meetingloop/queue": "workspace:*"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.3"
+  }
+}

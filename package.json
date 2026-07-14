@@ -1,0 +1,43 @@
+{
+  "name": "meetingloop-ai",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@11.7.0",
+  "scripts": {
+    "dev": "pnpm --filter @meetingloop/web dev",
+    "worker:dev": "pnpm --filter @meetingloop/worker dev",
+    "lint": "eslint . --max-warnings=0",
+    "typecheck": "tsc -b",
+    "test": "vitest run --environment node --exclude \"**/*.integration.test.ts\" --exclude \"tests/e2e/**\" --exclude \"**/dist/**\"",
+    "test:integration": "vitest run tests/integration --environment node --testTimeout 15000",
+    "test:e2e": "node scripts/run-e2e.mjs",
+    "build": "pnpm -r build",
+    "db:migrate": "pnpm --filter @meetingloop/db db:migrate",
+    "db:seed": "pnpm --filter @meetingloop/db db:seed",
+    "ci": "pnpm lint && pnpm typecheck && pnpm test && pnpm test:integration && pnpm build"
+  },
+  "devDependencies": {
+    "@eslint/js": "^9.30.1",
+    "@playwright/test": "^1.54.1",
+    "@types/node": "^24.0.10",
+    "@types/react": "^19.1.8",
+    "@types/react-dom": "^19.1.6",
+    "eslint": "^9.30.1",
+    "eslint-config-next": "^15.3.5",
+    "jsdom": "^26.1.0",
+    "playwright": "^1.54.1",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.35.1",
+    "vitest": "^3.2.4"
+  },
+  "dependencies": {
+    "@next/env": "^15.3.5",
+    "argon2": "^0.43.1",
+    "bullmq": "^5.56.0",
+    "next": "^15.3.5",
+    "pg": "^8.16.3",
+    "react": "^19.1.0",
+    "react-dom": "^19.1.0",
+    "zod": "^3.25.76"
+  }
+}

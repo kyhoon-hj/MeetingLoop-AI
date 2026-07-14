@@ -1,0 +1,26 @@
+{
+  "compilerOptions": {
+    "target": "ES2022",
+    "lib": ["ES2022", "DOM", "DOM.Iterable"],
+    "module": "ESNext",
+    "moduleResolution": "Bundler",
+    "strict": true,
+    "noUncheckedIndexedAccess": true,
+    "exactOptionalPropertyTypes": true,
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "esModuleInterop": true,
+    "skipLibCheck": true,
+    "forceConsistentCasingInFileNames": true,
+    "baseUrl": ".",
+    "paths": {
+      "@meetingloop/ai": ["packages/ai/src/index.ts"],
+      "@meetingloop/db": ["packages/db/src/index.ts"],
+      "@meetingloop/domain": ["packages/domain/src/index.ts"],
+      "@meetingloop/storage": ["packages/storage/src/index.ts"],
+      "@meetingloop/queue": ["packages/queue/src/index.ts"],
+      "@meetingloop/auth": ["packages/auth/src/index.ts"],
+      "@meetingloop/ui": ["packages/ui/src/index.ts"]
+    }
+  }
+}

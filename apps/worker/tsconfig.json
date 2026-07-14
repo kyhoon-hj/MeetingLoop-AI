@@ -1,0 +1,15 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    "composite": true,
+    "declaration": true,
+    "outDir": "dist",
+    "rootDir": "src"
+  },
+  "references": [
+    { "path": "../../packages/ai" },
+    { "path": "../../packages/queue" }
+  ],
+  "include": ["src/**/*.ts"],
+  "exclude": ["dist"]
+}

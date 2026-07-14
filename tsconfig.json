@@ -1,0 +1,14 @@
+{
+  "files": [],
+  "references": [
+    { "path": "apps/web" },
+    { "path": "apps/worker" },
+    { "path": "packages/ai" },
+    { "path": "packages/auth" },
+    { "path": "packages/db" },
+    { "path": "packages/domain" },
+    { "path": "packages/queue" },
+    { "path": "packages/storage" },
+    { "path": "packages/ui" }
+  ]
+}
