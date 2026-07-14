@@ -17,7 +17,7 @@ export interface AiStatus {
 
 const defaultOllamaHost = "http://127.0.0.1:11434";
 const defaultOllamaModel = "qwen3:4b";
-const defaultGeminiModel = "gemini-2.5-flash-lite";
+const defaultGeminiModel = "gemini-3.1-flash-lite";
 
 function environment() {
   const configuredProvider = process.env.ANALYSIS_PROVIDER;

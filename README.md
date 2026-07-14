@@ -47,7 +47,7 @@ ollama pull qwen3:4b
 ```dotenv
 ANALYSIS_PROVIDER=gemini
 GEMINI_API_KEY=발급받은_API_키
-GEMINI_MODEL=gemini-2.5-flash-lite
+GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
 Gemini 모드에서는 수정된 전사 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송하지 않습니다.

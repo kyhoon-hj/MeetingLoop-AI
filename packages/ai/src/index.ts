@@ -114,19 +114,17 @@ const minutesJsonSchema = {
         properties: {
           id: { type: "string" },
           content: { type: "string" },
-          assignee: { type: ["string", "null"] },
-          dueDate: { type: ["string", "null"], description: "명시된 경우 YYYY-MM-DD, 아니면 null" },
+          assignee: { type: "string", nullable: true },
+          dueDate: { type: "string", nullable: true, description: "명시된 경우 YYYY-MM-DD, 아니면 null" },
           evidenceSegmentSequence: { type: "integer", minimum: 0 }
         },
-        required: ["id", "content", "assignee", "dueDate", "evidenceSegmentSequence"],
-        additionalProperties: false
+        required: ["id", "content", "assignee", "dueDate", "evidenceSegmentSequence"]
       }
     },
     risks: { type: "array", items: { type: "string" }, maxItems: 20 },
     openQuestions: { type: "array", items: { type: "string" }, maxItems: 20 }
   },
-  required: ["title", "summary", "keyPoints", "discussionTopics", "decisions", "actionItems", "risks", "openQuestions"],
-  additionalProperties: false
+  required: ["title", "summary", "keyPoints", "discussionTopics", "decisions", "actionItems", "risks", "openQuestions"]
 } as const;
 
 const minutesSystemPrompt = [
@@ -351,7 +349,7 @@ export class GeminiMinutesProvider implements MinutesProvider {
 
   constructor(options: GeminiMinutesProviderOptions = {}) {
     this.apiKey = options.apiKey?.trim() ?? "";
-    this.model = options.model ?? "gemini-2.5-flash-lite";
+    this.model = options.model ?? "gemini-3.1-flash-lite";
     this.request = options.request ?? globalThis.fetch;
     this.timeoutMs = options.timeoutMs ?? 120_000;
   }

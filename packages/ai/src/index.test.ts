@@ -57,11 +57,29 @@ describe("real minutes providers", () => {
 
   it("generates structured minutes through Gemini without putting the key in the URL", async () => {
     const request = (async (input: string | URL | Request, init?: RequestInit) => {
-      expect(String(input)).toContain("gemini-2.5-flash-lite:generateContent");
+      expect(String(input)).toContain("gemini-3.1-flash-lite:generateContent");
       expect(String(input)).not.toContain("secret-key");
       expect(new Headers(init?.headers).get("x-goog-api-key")).toBe("secret-key");
-      const body = JSON.parse(String(init?.body)) as { generationConfig: { responseMimeType: string } };
+      const body = JSON.parse(String(init?.body)) as {
+        generationConfig: {
+          responseMimeType: string;
+          responseSchema: {
+            additionalProperties?: boolean;
+            properties: {
+              actionItems: {
+                items: {
+                  additionalProperties?: boolean;
+                  properties: { assignee: { nullable?: boolean } };
+                };
+              };
+            };
+          };
+        };
+      };
       expect(body.generationConfig.responseMimeType).toBe("application/json");
+      expect(body.generationConfig.responseSchema.additionalProperties).toBeUndefined();
+      expect(body.generationConfig.responseSchema.properties.actionItems.items.additionalProperties).toBeUndefined();
+      expect(body.generationConfig.responseSchema.properties.actionItems.items.properties.assignee.nullable).toBe(true);
       return Response.json({
         candidates: [{ content: { parts: [{ text: JSON.stringify(minutesDraft) }] } }]
       });
