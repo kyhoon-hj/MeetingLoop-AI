@@ -49,6 +49,7 @@ const server = spawn(
     env: {
       ...process.env,
       CI: "true",
+      ANALYSIS_PROVIDER: "mock",
       NEXT_TELEMETRY_DISABLED: "1"
     }
   }

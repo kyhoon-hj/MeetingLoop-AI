@@ -62,6 +62,118 @@ export interface MinutesProvider {
   generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft>;
 }
 
+export type MinutesProviderKind = "mock" | "ollama" | "gemini";
+
+export type MinutesProviderErrorCode =
+  | "AI_CONFIGURATION_REQUIRED"
+  | "AI_PROVIDER_UNAVAILABLE"
+  | "AI_MODEL_NOT_FOUND"
+  | "AI_RATE_LIMITED"
+  | "AI_RESPONSE_INVALID";
+
+export class MinutesProviderError extends Error {
+  constructor(
+    public readonly code: MinutesProviderErrorCode,
+    message: string
+  ) {
+    super(message);
+    this.name = "MinutesProviderError";
+  }
+}
+
+const generatedMinutesDraftSchema = z.object({
+  title: z.string().trim().min(1).max(160),
+  summary: z.string().trim().min(1).max(4000),
+  keyPoints: z.array(z.string().trim().min(1).max(1000)).min(1).max(20),
+  discussionTopics: z.array(z.string().trim().min(1).max(1000)).max(20),
+  decisions: z.array(z.string().trim().min(1).max(1000)).max(20),
+  actionItems: z.array(z.object({
+    id: z.string().trim().min(1).max(80),
+    content: z.string().trim().min(1).max(1000),
+    assignee: z.string().trim().nullable(),
+    dueDate: z.string().trim().nullable(),
+    evidenceSegmentSequence: z.number().int().nonnegative()
+  })).max(30),
+  risks: z.array(z.string().trim().min(1).max(1000)).max(20),
+  openQuestions: z.array(z.string().trim().min(1).max(1000)).max(20)
+});
+
+const minutesJsonSchema = {
+  type: "object",
+  properties: {
+    title: { type: "string", description: "회의 내용을 대표하는 짧은 한국어 제목" },
+    summary: { type: "string", description: "회의 전체 내용을 사실 중심으로 압축한 한국어 요약" },
+    keyPoints: { type: "array", items: { type: "string" }, minItems: 1, maxItems: 20 },
+    discussionTopics: { type: "array", items: { type: "string" }, maxItems: 20 },
+    decisions: { type: "array", items: { type: "string" }, maxItems: 20 },
+    actionItems: {
+      type: "array",
+      maxItems: 30,
+      items: {
+        type: "object",
+        properties: {
+          id: { type: "string" },
+          content: { type: "string" },
+          assignee: { type: ["string", "null"] },
+          dueDate: { type: ["string", "null"], description: "명시된 경우 YYYY-MM-DD, 아니면 null" },
+          evidenceSegmentSequence: { type: "integer", minimum: 0 }
+        },
+        required: ["id", "content", "assignee", "dueDate", "evidenceSegmentSequence"],
+        additionalProperties: false
+      }
+    },
+    risks: { type: "array", items: { type: "string" }, maxItems: 20 },
+    openQuestions: { type: "array", items: { type: "string" }, maxItems: 20 }
+  },
+  required: ["title", "summary", "keyPoints", "discussionTopics", "decisions", "actionItems", "risks", "openQuestions"],
+  additionalProperties: false
+} as const;
+
+const minutesSystemPrompt = [
+  "당신은 한국어 회의록 작성 전문가입니다.",
+  "제공된 전사 TXT에 명시된 사실만 사용하고, 결정·담당자·기한을 추측하거나 만들어내지 마세요.",
+  "결정되지 않은 내용은 미결 질문 또는 리스크에 넣고, 언급되지 않은 항목은 빈 배열로 반환하세요.",
+  "할 일의 evidenceSegmentSequence는 근거가 되는 전사 문장 번호여야 합니다.",
+  "간결하지만 실제 업무에 바로 사용할 수 있는 회의록을 작성하세요."
+].join("\n");
+
+function minutesPrompt(input: { meetingId: string; transcript: TranscriptTextSegment[] }): string {
+  const transcript = input.transcript
+    .map((segment) => `[문장 ${segment.sequence}] ${segment.speakerLabel}: ${segment.editedText}`)
+    .join("\n");
+
+  return [
+    `회의 ID: ${input.meetingId}`,
+    "아래 전사를 분석해 제목, 요약, 주요 논의, 결정, 할 일, 리스크, 미결 질문을 구조화하세요.",
+    "단순히 문장을 복사하지 말고 같은 주제를 묶되, 전사에 없는 사실은 추가하지 마세요.",
+    "",
+    transcript
+  ].join("\n");
+}
+
+function parseMinutesJson(value: string): GeneratedMinutesDraft {
+  try {
+    return generatedMinutesDraftSchema.parse(JSON.parse(value));
+  } catch {
+    throw new MinutesProviderError("AI_RESPONSE_INVALID", "AI가 유효한 회의록 형식으로 응답하지 않았습니다. 다시 시도해 주세요.");
+  }
+}
+
+async function fetchWithTimeout(
+  request: typeof fetch,
+  input: string,
+  init: RequestInit,
+  timeoutMs: number
+): Promise<Response> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await request(input, { ...init, signal: controller.signal });
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
 export class MockSpeechToTextProvider implements SpeechToTextProvider {
   async transcribe(input: { recordingId: string }): Promise<TranscriptSegmentResult[]> {
     void input;
@@ -155,6 +267,186 @@ export class MockMinutesProvider implements MinutesProvider {
       openQuestions
     };
   }
+}
+
+interface OllamaMinutesProviderOptions {
+  baseUrl?: string | undefined;
+  model?: string | undefined;
+  request?: typeof fetch | undefined;
+  timeoutMs?: number | undefined;
+}
+
+export class OllamaMinutesProvider implements MinutesProvider {
+  readonly kind = "ollama" as const;
+  readonly model: string;
+  private readonly baseUrl: string;
+  private readonly request: typeof fetch;
+  private readonly timeoutMs: number;
+
+  constructor(options: OllamaMinutesProviderOptions = {}) {
+    this.baseUrl = (options.baseUrl ?? "http://127.0.0.1:11434").replace(/\/+$/, "");
+    this.model = options.model ?? "qwen3:4b";
+    this.request = options.request ?? globalThis.fetch;
+    this.timeoutMs = options.timeoutMs ?? 180_000;
+  }
+
+  async generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft> {
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(this.request, `${this.baseUrl}/api/chat`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          model: this.model,
+          stream: false,
+          format: minutesJsonSchema,
+          messages: [
+            { role: "system", content: minutesSystemPrompt },
+            { role: "user", content: minutesPrompt(input) }
+          ],
+          options: { temperature: 0.1 }
+        })
+      }, this.timeoutMs);
+    } catch {
+      throw new MinutesProviderError(
+        "AI_PROVIDER_UNAVAILABLE",
+        "로컬 AI에 연결하지 못했습니다. Ollama가 실행 중인지 확인해 주세요."
+      );
+    }
+
+    if (!response.ok) {
+      if (response.status === 404) {
+        throw new MinutesProviderError(
+          "AI_MODEL_NOT_FOUND",
+          `로컬 AI 모델 ${this.model}이 설치되어 있지 않습니다.`
+        );
+      }
+      throw new MinutesProviderError("AI_PROVIDER_UNAVAILABLE", "로컬 AI가 회의록을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    }
+
+    const payload = z.object({
+      message: z.object({ content: z.string().min(1) })
+    }).safeParse(await response.json());
+    if (!payload.success) {
+      throw new MinutesProviderError("AI_RESPONSE_INVALID", "로컬 AI 응답을 읽지 못했습니다. 다시 시도해 주세요.");
+    }
+
+    return parseMinutesJson(payload.data.message.content);
+  }
+}
+
+interface GeminiMinutesProviderOptions {
+  apiKey?: string | undefined;
+  model?: string | undefined;
+  request?: typeof fetch | undefined;
+  timeoutMs?: number | undefined;
+}
+
+export class GeminiMinutesProvider implements MinutesProvider {
+  readonly kind = "gemini" as const;
+  readonly model: string;
+  private readonly apiKey: string;
+  private readonly request: typeof fetch;
+  private readonly timeoutMs: number;
+
+  constructor(options: GeminiMinutesProviderOptions = {}) {
+    this.apiKey = options.apiKey?.trim() ?? "";
+    this.model = options.model ?? "gemini-2.5-flash-lite";
+    this.request = options.request ?? globalThis.fetch;
+    this.timeoutMs = options.timeoutMs ?? 120_000;
+  }
+
+  async generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft> {
+    if (!this.apiKey) {
+      throw new MinutesProviderError(
+        "AI_CONFIGURATION_REQUIRED",
+        "Gemini API 키가 설정되지 않았습니다. GEMINI_API_KEY를 설정해 주세요."
+      );
+    }
+
+    let response: Response;
+    try {
+      response = await fetchWithTimeout(
+        this.request,
+        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": this.apiKey
+          },
+          body: JSON.stringify({
+            systemInstruction: { parts: [{ text: minutesSystemPrompt }] },
+            contents: [{ role: "user", parts: [{ text: minutesPrompt(input) }] }],
+            generationConfig: {
+              responseMimeType: "application/json",
+              responseSchema: minutesJsonSchema,
+              temperature: 0.2
+            }
+          })
+        },
+        this.timeoutMs
+      );
+    } catch {
+      throw new MinutesProviderError("AI_PROVIDER_UNAVAILABLE", "Gemini에 연결하지 못했습니다. 네트워크 상태를 확인해 주세요.");
+    }
+
+    if (!response.ok) {
+      if (response.status === 401 || response.status === 403) {
+        throw new MinutesProviderError("AI_CONFIGURATION_REQUIRED", "Gemini API 키가 올바르지 않거나 사용할 권한이 없습니다.");
+      }
+      if (response.status === 404) {
+        throw new MinutesProviderError("AI_MODEL_NOT_FOUND", `Gemini 모델 ${this.model}을 사용할 수 없습니다.`);
+      }
+      if (response.status === 429) {
+        throw new MinutesProviderError("AI_RATE_LIMITED", "Gemini 무료 사용량 제한에 도달했습니다. 잠시 후 다시 시도해 주세요.");
+      }
+      throw new MinutesProviderError("AI_PROVIDER_UNAVAILABLE", "Gemini가 회의록을 생성하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+    }
+
+    const payload = z.object({
+      candidates: z.array(z.object({
+        content: z.object({
+          parts: z.array(z.object({ text: z.string().optional() }))
+        })
+      })).min(1)
+    }).safeParse(await response.json());
+    const content = payload.success
+      ? payload.data.candidates[0]?.content.parts.map((part) => part.text ?? "").join("").trim()
+      : "";
+    if (!content) {
+      throw new MinutesProviderError("AI_RESPONSE_INVALID", "Gemini 응답에서 회의록 내용을 찾지 못했습니다. 다시 시도해 주세요.");
+    }
+
+    return parseMinutesJson(content);
+  }
+}
+
+export interface CreateMinutesProviderOptions {
+  kind: MinutesProviderKind;
+  geminiApiKey?: string | undefined;
+  geminiModel?: string | undefined;
+  ollamaBaseUrl?: string | undefined;
+  ollamaModel?: string | undefined;
+  request?: typeof fetch | undefined;
+}
+
+export function createMinutesProvider(options: CreateMinutesProviderOptions): MinutesProvider {
+  if (options.kind === "gemini") {
+    return new GeminiMinutesProvider({
+      apiKey: options.geminiApiKey,
+      model: options.geminiModel,
+      request: options.request
+    });
+  }
+  if (options.kind === "ollama") {
+    return new OllamaMinutesProvider({
+      baseUrl: options.ollamaBaseUrl,
+      model: options.ollamaModel,
+      request: options.request
+    });
+  }
+  return new MockMinutesProvider();
 }
 
 export function createMockMeetingPipeline() {
