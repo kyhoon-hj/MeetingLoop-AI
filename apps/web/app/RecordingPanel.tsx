@@ -59,6 +59,7 @@ interface MinutesDraft {
   discussionTopics: string[];
   decisions: string[];
   actionItems: Array<{
+    id: string;
     content: string;
     assignee: string | null;
     dueDate: string | null;
@@ -181,6 +182,10 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const [minutesDraft, setMinutesDraft] = useState<MinutesDraft | null>(null);
   const [minutesMessage, setMinutesMessage] = useState("전사 TXT를 저장한 뒤 AI 분석 보고서를 만들 수 있습니다.");
   const [isGeneratingMinutes, setIsGeneratingMinutes] = useState(false);
+  const [isFinalizingMinutes, setIsFinalizingMinutes] = useState(false);
+  const [finalRecordMessage, setFinalRecordMessage] = useState("AI 분석 보고서를 수정한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
+  const [recordingFileUrl, setRecordingFileUrl] = useState<string | null>(null);
+  const [recordingFileName, setRecordingFileName] = useState("meeting-recording.webm");
   const [message, setMessage] = useState("마이크 권한을 허용하면 브라우저 녹음을 시작할 수 있습니다.");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
@@ -188,6 +193,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const recognitionRef = useRef<LiveSpeechRecognition | null>(null);
   const recognitionShouldRunRef = useRef(false);
   const liveDraftIdRef = useRef<string | null>(null);
+  const recordedChunksRef = useRef<Blob[]>([]);
 
   useEffect(() => {
     if (state !== "recording") {
@@ -213,6 +219,12 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     recognitionRef.current?.stop();
     streamRef.current?.getTracks().forEach((track) => track.stop());
   }, []);
+
+  useEffect(() => () => {
+    if (recordingFileUrl) {
+      URL.revokeObjectURL(recordingFileUrl);
+    }
+  }, [recordingFileUrl]);
 
   function upsertLiveDraft(text: string, isFinal: boolean) {
     const cleanText = text.trim();
@@ -301,6 +313,12 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       const options: MediaRecorderOptions = MediaRecorder.isTypeSupported("audio/webm") ? { mimeType: "audio/webm" } : {};
       const recorder = new MediaRecorder(stream, options);
       mediaRecorderRef.current = recorder;
+      recordedChunksRef.current = [];
+      if (recordingFileUrl) {
+        URL.revokeObjectURL(recordingFileUrl);
+      }
+      setRecordingFileUrl(null);
+      setRecordingFileName(`meeting-recording-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`);
       setChunkCount(0);
       setStoredBytes(0);
       setUploadedChunks(0);
@@ -316,6 +334,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
           return;
         }
 
+        recordedChunksRef.current.push(event.data);
         storeChunk(event.data)
           .then((meta) => {
             setChunkCount((value) => value + 1);
@@ -331,7 +350,13 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         stopLiveRecognition();
         setLevel(0);
         setState("stopped");
-        setMessage("녹음이 종료되었습니다. 연결 복구 후 저장된 청크를 업로드할 수 있습니다.");
+        const recordingBlob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        if (recordingBlob.size > 0) {
+          setRecordingFileUrl(URL.createObjectURL(recordingBlob));
+          setMessage("녹음이 종료되었습니다. 녹음 파일 저장 버튼으로 PC 다운로드 폴더에 저장하세요.");
+        } else {
+          setMessage("녹음이 종료되었습니다. 저장할 음성 데이터가 없으면 전사 TXT만 정리할 수 있습니다.");
+        }
       };
       recorder.start(5000);
       startLiveRecognition();
@@ -537,6 +562,45 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     }
   }
 
+  function updateMinutesDraft<K extends keyof MinutesDraft>(key: K, value: MinutesDraft[K]) {
+    setMinutesDraft((draft) => draft ? { ...draft, [key]: value } : draft);
+  }
+
+  function splitLines(value: string): string[] {
+    return value.split(/\r?\n/).map((line) => line.trim()).filter(Boolean);
+  }
+
+  async function finalizeMinutesDraft() {
+    if (!meetingId || !minutesDraft) {
+      setFinalRecordMessage("AI 분석 보고서를 먼저 생성한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
+      return;
+    }
+
+    setIsFinalizingMinutes(true);
+    setFinalRecordMessage("수정한 AI 분석 보고서를 최종 기록으로 서버에 저장합니다.");
+    try {
+      const response = await fetch("/api/minutes/finalize", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          meetingId,
+          ...minutesDraft
+        })
+      });
+
+      if (!response.ok) {
+        setFinalRecordMessage("최종 서버 저장 기록을 남기지 못했습니다. 잠시 후 다시 시도해 주세요.");
+        return;
+      }
+
+      const payload = await response.json() as { minutes: MinutesDraft };
+      setMinutesDraft(payload.minutes);
+      setFinalRecordMessage("최종 서버 저장 기록을 남겼습니다. 서버에는 전사 TXT와 확정 회의록만 저장됩니다.");
+    } finally {
+      setIsFinalizingMinutes(false);
+    }
+  }
+
   const canStart = state === "idle" || state === "stopped" || state === "error";
   const canPause = state === "recording";
   const canResume = state === "paused";
@@ -558,6 +622,11 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         <button className="button secondary" type="button" onClick={resumeRecording} disabled={!canResume}>재개</button>
         <button className="button danger" type="button" onClick={stopRecording} disabled={!canStop}>종료</button>
       </div>
+      {recordingFileUrl ? (
+        <a className="button secondary download-link" href={recordingFileUrl} download={recordingFileName}>
+          녹음 파일 저장
+        </a>
+      ) : null}
       <div className="upload-meter" aria-label={`업로드 진행률 ${uploadProgress}%`}>
         <span style={{ width: `${uploadProgress}%` }} />
       </div>
@@ -617,32 +686,54 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         </div>
         {minutesDraft ? (
           <div className="minutes-body">
-            <h3>{minutesDraft.title}</h3>
-            <p>{minutesDraft.summary}</p>
-            <strong>요약 보고서</strong>
-            <ul>
-              {minutesDraft.keyPoints.map((point) => <li key={point}>{point}</li>)}
-            </ul>
-            <strong>주요 논의</strong>
-            <ul>
-              {minutesDraft.discussionTopics.map((topic) => <li key={topic}>{topic}</li>)}
-            </ul>
-            <strong>결정</strong>
-            <ul>
-              {minutesDraft.decisions.map((decision) => <li key={decision}>{decision}</li>)}
-            </ul>
-            <strong>할 일</strong>
-            <ul>
-              {minutesDraft.actionItems.map((item) => <li key={item.content}>{item.content}</li>)}
-            </ul>
-            <strong>리스크</strong>
-            <ul>
-              {minutesDraft.risks.map((risk) => <li key={risk}>{risk}</li>)}
-            </ul>
-            <strong>미결 질문</strong>
-            <ul>
-              {minutesDraft.openQuestions.map((question) => <li key={question}>{question}</li>)}
-            </ul>
+            <label>
+              제목
+              <input value={minutesDraft.title} onChange={(event) => updateMinutesDraft("title", event.target.value)} />
+            </label>
+            <label>
+              요약
+              <textarea value={minutesDraft.summary} onChange={(event) => updateMinutesDraft("summary", event.target.value)} rows={4} />
+            </label>
+            <label>
+              요약 보고서
+              <textarea value={minutesDraft.keyPoints.join("\n")} onChange={(event) => updateMinutesDraft("keyPoints", splitLines(event.target.value))} rows={4} />
+            </label>
+            <label>
+              주요 논의
+              <textarea value={minutesDraft.discussionTopics.join("\n")} onChange={(event) => updateMinutesDraft("discussionTopics", splitLines(event.target.value))} rows={4} />
+            </label>
+            <label>
+              결정
+              <textarea value={minutesDraft.decisions.join("\n")} onChange={(event) => updateMinutesDraft("decisions", splitLines(event.target.value))} rows={3} />
+            </label>
+            <label>
+              할 일
+              <textarea
+                value={minutesDraft.actionItems.map((item) => item.content).join("\n")}
+                onChange={(event) => updateMinutesDraft("actionItems", splitLines(event.target.value).map((content, index) => ({
+                  id: minutesDraft.actionItems[index]?.id ?? `action-${index + 1}`,
+                  content,
+                  assignee: minutesDraft.actionItems[index]?.assignee ?? null,
+                  dueDate: minutesDraft.actionItems[index]?.dueDate ?? null,
+                  evidenceSegmentSequence: minutesDraft.actionItems[index]?.evidenceSegmentSequence ?? 0
+                })))}
+                rows={3}
+              />
+            </label>
+            <label>
+              리스크
+              <textarea value={minutesDraft.risks.join("\n")} onChange={(event) => updateMinutesDraft("risks", splitLines(event.target.value))} rows={3} />
+            </label>
+            <label>
+              미결 질문
+              <textarea value={minutesDraft.openQuestions.join("\n")} onChange={(event) => updateMinutesDraft("openQuestions", splitLines(event.target.value))} rows={3} />
+            </label>
+            <div className="toolbar">
+              <button className="button" type="button" onClick={finalizeMinutesDraft} disabled={isFinalizingMinutes}>
+                최종 서버 저장 기록 남기기
+              </button>
+            </div>
+            <p className="muted">{finalRecordMessage}</p>
           </div>
         ) : null}
       </section>

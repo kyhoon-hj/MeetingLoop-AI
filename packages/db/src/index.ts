@@ -557,6 +557,62 @@ export async function createDemoMeeting(userId: string, role: Role, input: Creat
   };
 }
 
+export async function ensureDemoQuickCaptureMeeting(userId: string, role: Role, organizationId: string): Promise<Meeting> {
+  const state = await getDemoState();
+  const membership = getMembership(state, userId, organizationId);
+  assertMeetingEditorRole(role);
+  assertMeetingEditorRole(membership.role);
+
+  const projectId = `${organizationId}-quick-recordings`;
+  let project = state.projects.find((item) => item.id === projectId);
+  const timestamp = nowIso();
+  if (!project) {
+    project = {
+      id: projectId,
+      organizationId,
+      name: "빠른 녹음",
+      key: "QUICK",
+      description: "녹음 후 전사와 AI 분석 보고서를 바로 만드는 기본 보관함",
+      status: "ACTIVE",
+      createdBy: userId,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    state.projects.push(project);
+  } else if (project.status === "ARCHIVED") {
+    project.status = "ACTIVE";
+    project.updatedAt = timestamp;
+  }
+
+  const existing = state.meetings.find((item) => item.organizationId === organizationId && item.projectId === projectId && item.status !== "ARCHIVED");
+  if (existing) {
+    return existing;
+  }
+
+  const meetingId = `${organizationId}-quick-meeting`;
+  const meeting: Meeting = {
+    id: meetingId,
+    organizationId,
+    projectId,
+    title: "빠른 녹음 회의록",
+    titleStatus: "CONFIRMED",
+    meetingType: "GENERAL",
+    status: "REVIEW",
+    startedAt: timestamp,
+    endedAt: null,
+    timezone: "Asia/Seoul",
+    sourceType: "BROWSER_RECORDING",
+    recordingConsentAt: timestamp,
+    createdBy: userId,
+    approvedBy: null,
+    approvedAt: null,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  };
+  state.meetings.push(meeting);
+  return meeting;
+}
+
 export async function saveDemoTranscriptSegments(userId: string, role: Role, input: SaveTranscriptSegmentsInput): Promise<TranscriptSegment[]> {
   const state = await getDemoState();
   const parsed = saveTranscriptSegmentsInputSchema.parse(input);
@@ -660,6 +716,90 @@ export async function generateDemoMinutesFromTranscript(
     openQuestions: generated.openQuestions,
     source: "TRANSCRIPT_TEXT",
     status: "DRAFT",
+    createdBy: userId,
+    createdAt: existing?.createdAt ?? timestamp,
+    updatedAt: timestamp
+  };
+
+  if (existing) {
+    Object.assign(existing, next);
+    return existing;
+  }
+
+  state.minutes.push(next);
+  return next;
+}
+
+export async function confirmDemoMinutes(
+  userId: string,
+  role: Role,
+  input: GenerateMinutesInput,
+  draft: Pick<MeetingMinutes, "title" | "summary" | "keyPoints" | "discussionTopics" | "decisions" | "actionItems" | "risks" | "openQuestions">
+): Promise<MeetingMinutes> {
+  const state = await getDemoState();
+  const parsed = generateMinutesInputSchema.parse(input);
+  const membership = getMembership(state, userId, parsed.organizationId);
+  assertMeetingEditorRole(role);
+  assertMeetingEditorRole(membership.role);
+
+  let meeting = state.meetings.find((item) => item.id === parsed.meetingId && item.status !== "ARCHIVED");
+  if (!meeting) {
+    const timestamp = nowIso();
+    const projectId = `${parsed.organizationId}-quick-recordings`;
+    let project = state.projects.find((item) => item.id === projectId);
+    if (!project) {
+      project = {
+        id: projectId,
+        organizationId: parsed.organizationId,
+        name: "빠른 녹음",
+        key: "QUICK",
+        description: "녹음 후 전사와 AI 분석 보고서를 바로 만드는 기본 보관함",
+        status: "ACTIVE",
+        createdBy: userId,
+        createdAt: timestamp,
+        updatedAt: timestamp
+      };
+      state.projects.push(project);
+    }
+    meeting = {
+      id: parsed.meetingId,
+      organizationId: parsed.organizationId,
+      projectId,
+      title: "빠른 녹음 회의록",
+      titleStatus: "CONFIRMED",
+      meetingType: "GENERAL",
+      status: "REVIEW",
+      startedAt: timestamp,
+      endedAt: null,
+      timezone: "Asia/Seoul",
+      sourceType: "BROWSER_RECORDING",
+      recordingConsentAt: timestamp,
+      createdBy: userId,
+      approvedBy: null,
+      approvedAt: null,
+      createdAt: timestamp,
+      updatedAt: timestamp
+    };
+    state.meetings.push(meeting);
+  }
+  assertSameOrganization(parsed.organizationId, meeting.organizationId);
+
+  const timestamp = nowIso();
+  const existing = state.minutes.find((minutes) => minutes.meetingId === parsed.meetingId);
+  const next: MeetingMinutes = {
+    id: existing?.id ?? `${parsed.meetingId}-minutes-1`,
+    organizationId: parsed.organizationId,
+    meetingId: parsed.meetingId,
+    title: draft.title,
+    summary: draft.summary,
+    keyPoints: draft.keyPoints,
+    discussionTopics: draft.discussionTopics,
+    decisions: draft.decisions,
+    actionItems: draft.actionItems,
+    risks: draft.risks,
+    openQuestions: draft.openQuestions,
+    source: "TRANSCRIPT_TEXT",
+    status: "CONFIRMED",
     createdBy: userId,
     createdAt: existing?.createdAt ?? timestamp,
     updatedAt: timestamp

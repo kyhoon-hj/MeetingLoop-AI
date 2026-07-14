@@ -116,6 +116,10 @@ a {
   min-height: calc(100vh - 96px);
 }
 
+.full-workbench {
+  margin: 16px clamp(16px, 4vw, 40px) 32px;
+}
+
 .setup-panel {
   align-self: start;
 }
@@ -396,6 +400,11 @@ a {
   background: #fbfcfd;
 }
 
+.download-link {
+  width: fit-content;
+  text-decoration: none;
+}
+
 .recorder-status,
 .recorder-facts {
   display: flex;
@@ -528,6 +537,25 @@ a {
   gap: 10px;
   border-left: 3px solid var(--accent);
   padding-left: 12px;
+}
+
+.minutes-body label {
+  display: grid;
+  gap: 6px;
+  color: var(--muted);
+  font-weight: 700;
+}
+
+.minutes-body input,
+.minutes-body textarea {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 9px 10px;
+  resize: vertical;
+  color: var(--ink);
+  font: inherit;
+  font-weight: 500;
 }
 
 .minutes-body ul {
