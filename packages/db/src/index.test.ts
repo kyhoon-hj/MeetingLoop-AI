@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { archiveDemoProject, authenticateDemoUser, createDemoMeeting, createDemoProject, generateDemoMinutesFromTranscript, getDemoProjectForOrganization, getDemoTranscriptSegments, getDemoWorkspace, registerDemoOrganization, saveDemoTranscriptSegments, updateDemoProject } from "./index";
+import { archiveDemoProject, authenticateDemoUser, createDemoMeeting, createDemoProject, generateDemoMinutesFromTranscript, getDemoProjectForOrganization, getDemoTranscriptSegments, getDemoWorkspace, registerDemoOrganization, restoreDemoProject, saveDemoTranscriptSegments, updateDemoProject } from "./index";
 
 describe("demo organization and project repository", () => {
   it("authenticates demo users and returns only organization scoped projects", async () => {
@@ -68,6 +68,16 @@ describe("demo organization and project repository", () => {
     expect(archived.status).toBe("ARCHIVED");
     const workspace = await getDemoWorkspace("user-admin", "org-demo");
     expect(workspace?.projects.some((item) => item.id === project.id)).toBe(false);
+    expect(workspace?.archivedProjects.some((item) => item.id === project.id)).toBe(true);
+
+    const restored = await restoreDemoProject("user-admin", "ORG_ADMIN", {
+      organizationId: "org-demo",
+      projectId: project.id
+    });
+    expect(restored.status).toBe("ACTIVE");
+    const restoredWorkspace = await getDemoWorkspace("user-admin", "org-demo");
+    expect(restoredWorkspace?.projects.some((item) => item.id === project.id)).toBe(true);
+    expect(restoredWorkspace?.archivedProjects.some((item) => item.id === project.id)).toBe(false);
   });
 
   it("creates a meeting capture bundle with consent, participants, agendas, and fixture recording", async () => {

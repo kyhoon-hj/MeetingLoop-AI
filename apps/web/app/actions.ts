@@ -3,8 +3,8 @@
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
 import { createSessionToken } from "@meetingloop/auth";
-import { archiveDemoProject, authenticateDemoUser, createDemoMeeting, createDemoProject, registerDemoOrganization, updateDemoProject } from "@meetingloop/db";
-import { archiveProjectInputSchema, createMeetingInputSchema, createProjectInputSchema, registerOrganizationInputSchema, updateProjectInputSchema } from "@meetingloop/domain";
+import { archiveDemoProject, authenticateDemoUser, createDemoMeeting, createDemoProject, registerDemoOrganization, restoreDemoProject, updateDemoProject } from "@meetingloop/db";
+import { archiveProjectInputSchema, createMeetingInputSchema, createProjectInputSchema, registerOrganizationInputSchema, restoreProjectInputSchema, updateProjectInputSchema } from "@meetingloop/domain";
 import { getSessionPayload, getSessionSecret, sessionCookieName } from "./session";
 
 function formValue(formData: FormData, key: string): string {
@@ -132,6 +132,27 @@ export async function archiveProjectAction(formData: FormData): Promise<void> {
 
   try {
     await archiveDemoProject(payload.userId, payload.role, input);
+  } catch (error) {
+    const code = error instanceof Error ? error.message : "project";
+    redirect(`/?error=${encodeURIComponent(code)}`);
+  }
+
+  redirect("/");
+}
+
+export async function restoreProjectAction(formData: FormData): Promise<void> {
+  const payload = await getSessionPayload();
+  if (!payload) {
+    redirect("/?error=session");
+  }
+
+  const input = restoreProjectInputSchema.parse({
+    organizationId: payload.organizationId,
+    projectId: formValue(formData, "projectId")
+  });
+
+  try {
+    await restoreDemoProject(payload.userId, payload.role, input);
   } catch (error) {
     const code = error instanceof Error ? error.message : "project";
     redirect(`/?error=${encodeURIComponent(code)}`);

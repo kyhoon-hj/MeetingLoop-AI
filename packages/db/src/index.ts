@@ -8,6 +8,7 @@ import {
   createMeetingInputSchema,
   generateMinutesInputSchema,
   registerOrganizationInputSchema,
+  restoreProjectInputSchema,
   saveTranscriptSegmentsInputSchema,
   updateProjectInputSchema,
   type ArchiveProjectInput,
@@ -23,6 +24,7 @@ import {
   type Project,
   type Recording,
   type RegisterOrganizationInput,
+  type RestoreProjectInput,
   type Role,
   type SaveTranscriptSegmentsInput,
   type TranscriptSegment,
@@ -58,6 +60,7 @@ export interface DemoSession {
 
 export interface DemoWorkspace extends DemoSession {
   projects: Project[];
+  archivedProjects: Project[];
   meetings: DemoMeetingSummary[];
 }
 
@@ -299,6 +302,7 @@ export async function getDemoWorkspace(userId: string, organizationId: string): 
   return {
     ...session,
     projects: state.projects.filter((project) => project.organizationId === organizationId && project.status === "ACTIVE"),
+    archivedProjects: state.projects.filter((project) => project.organizationId === organizationId && project.status === "ARCHIVED"),
     meetings: state.meetings
       .filter((meeting) => meeting.organizationId === organizationId && meeting.status !== "ARCHIVED")
       .map((meeting) => {
@@ -430,6 +434,24 @@ export async function archiveDemoProject(userId: string, role: Role, input: Arch
   assertSameOrganization(parsed.organizationId, project.organizationId);
 
   project.status = "ARCHIVED";
+  project.updatedAt = nowIso();
+  return project;
+}
+
+export async function restoreDemoProject(userId: string, role: Role, input: RestoreProjectInput): Promise<Project> {
+  const state = await getDemoState();
+  const parsed = restoreProjectInputSchema.parse(input);
+  const membership = getMembership(state, userId, parsed.organizationId);
+  assertProjectManagerRole(role);
+  assertProjectManagerRole(membership.role);
+
+  const project = state.projects.find((item) => item.id === parsed.projectId);
+  if (!project) {
+    throw new Error("PROJECT_NOT_FOUND");
+  }
+  assertSameOrganization(parsed.organizationId, project.organizationId);
+
+  project.status = "ACTIVE";
   project.updatedAt = nowIso();
   return project;
 }

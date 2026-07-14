@@ -1,6 +1,6 @@
 import { canManageProject } from "@meetingloop/auth";
 import { getDemoWorkspace } from "@meetingloop/db";
-import { archiveProjectAction, createMeetingAction, createProjectAction, loginAction, logoutAction, registerAction, updateProjectAction } from "./actions";
+import { archiveProjectAction, createMeetingAction, createProjectAction, loginAction, logoutAction, registerAction, restoreProjectAction, updateProjectAction } from "./actions";
 import RecordingPanel from "./RecordingPanel";
 import { getSessionPayload } from "./session";
 
@@ -221,8 +221,9 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
 
             <details className="compact-details">
               <summary>프로젝트 관리</summary>
+              <strong>활성 프로젝트</strong>
               <ul className="list">
-                {workspace.projects.map((project) => (
+                {workspace.projects.length > 0 ? workspace.projects.map((project) => (
                   <li key={project.id}>
                     <strong>{project.name}</strong>
                     {canCreateProject ? (
@@ -246,7 +247,22 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
                       </div>
                     ) : null}
                   </li>
-                ))}
+                )) : <li className="muted">활성 프로젝트가 없습니다.</li>}
+              </ul>
+              <strong>보관된 프로젝트</strong>
+              <ul className="list">
+                {workspace.archivedProjects.length > 0 ? workspace.archivedProjects.map((project) => (
+                  <li key={project.id}>
+                    <strong>{project.name}</strong>
+                    <span className="status-pill">보관됨</span>
+                    {canCreateProject ? (
+                      <form action={restoreProjectAction}>
+                        <input type="hidden" name="projectId" value={project.id} />
+                        <button className="button secondary" type="submit">복원</button>
+                      </form>
+                    ) : null}
+                  </li>
+                )) : <li className="muted">보관된 프로젝트가 없습니다.</li>}
               </ul>
             </details>
           </div>

@@ -86,6 +86,11 @@ export const archiveProjectInputSchema = z.object({
   projectId: z.string().min(1)
 });
 
+export const restoreProjectInputSchema = z.object({
+  organizationId: z.string().min(1),
+  projectId: z.string().min(1)
+});
+
 export const registerOrganizationInputSchema = z.object({
   email: z.string().email(),
   password: z.string().min(8).max(128),
@@ -250,6 +255,7 @@ export type Project = z.infer<typeof projectSchema>;
 export type CreateProjectInput = z.infer<typeof createProjectInputSchema>;
 export type UpdateProjectInput = z.infer<typeof updateProjectInputSchema>;
 export type ArchiveProjectInput = z.infer<typeof archiveProjectInputSchema>;
+export type RestoreProjectInput = z.infer<typeof restoreProjectInputSchema>;
 export type RegisterOrganizationInput = z.infer<typeof registerOrganizationInputSchema>;
 export type Meeting = z.infer<typeof meetingSchema>;
 export type Participant = z.infer<typeof participantSchema>;

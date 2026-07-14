@@ -87,4 +87,9 @@ test("registers a new organization and can update then archive a project", async
   const updatedCard = page.locator("li").filter({ hasText: "수정된 가입 조직 프로젝트" });
   await updatedCard.getByRole("button", { name: "보관" }).click();
   await expect(page.locator(".mini-list-row").filter({ hasText: "수정된 가입 조직 프로젝트" })).toHaveCount(0);
+  await expect(page.getByText("보관된 프로젝트")).toBeVisible();
+  const archivedCard = page.locator("li").filter({ hasText: "수정된 가입 조직 프로젝트" });
+  await expect(archivedCard).toContainText("보관됨");
+  await archivedCard.getByRole("button", { name: "복원" }).click();
+  await expect(page.locator(".mini-list-row").filter({ hasText: "수정된 가입 조직 프로젝트" })).toBeVisible();
 });
