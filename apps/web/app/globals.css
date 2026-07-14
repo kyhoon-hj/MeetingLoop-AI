@@ -1,15 +1,15 @@
 :root {
   color-scheme: light;
-  --bg: #eef1f4;
+  --bg: #f4f6f8;
   --panel: #ffffff;
   --ink: #20262e;
   --ink-soft: #414a56;
   --muted: #667085;
   --line: #d8dde5;
   --line-strong: #c5ccd6;
-  --accent: #0b6b57;
-  --accent-strong: #075746;
-  --accent-soft: #edf7f3;
+  --accent: #008a4b;
+  --accent-strong: #006f3d;
+  --accent-soft: #edf9f2;
   --info: #315f9f;
   --info-soft: #eef4fb;
   --warning: #a15c07;
@@ -110,7 +110,7 @@ a {
   flex: 0 0 auto;
   place-items: center;
   border-radius: 7px;
-  background: #1f2933;
+  background: #03a65a;
   color: white;
   font-size: 15px;
   font-weight: 800;
@@ -193,12 +193,20 @@ a {
 
 .full-workbench > .panel-header {
   padding: 22px clamp(18px, 3vw, 36px) 18px;
-  border-bottom: 0;
-  background: var(--bg);
+  border-bottom: 1px solid var(--line);
+  background: white;
 }
 
 .full-workbench > .panel-body {
-  padding: 0 clamp(18px, 3vw, 36px) 28px;
+  padding: 16px clamp(18px, 3vw, 36px) 28px;
+}
+
+.workspace-label {
+  display: block;
+  margin-bottom: 3px;
+  color: var(--accent);
+  font-size: 12px;
+  font-weight: 750;
 }
 
 .setup-panel {
@@ -619,7 +627,7 @@ a {
   background: var(--info);
 }
 
-.recorder-panel > .toolbar {
+.recording-controls {
   gap: 6px;
   padding: 0 16px 14px;
   background: #fbfcfd;
@@ -629,26 +637,78 @@ a {
   margin: 0 16px 12px;
 }
 
+.storage-details {
+  border-top: 1px solid var(--line);
+  background: white;
+}
+
+.storage-details summary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 42px;
+  padding: 0 16px;
+  color: var(--ink-soft);
+  font-size: 12px;
+  font-weight: 700;
+  list-style: none;
+}
+
+.storage-details summary::-webkit-details-marker {
+  display: none;
+}
+
+.storage-details summary::after {
+  content: "+";
+  display: grid;
+  width: 22px;
+  height: 22px;
+  flex: 0 0 auto;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: #f7f8fa;
+  color: var(--muted);
+  font-size: 16px;
+  font-weight: 500;
+}
+
+.storage-details[open] summary::after {
+  content: "−";
+}
+
+.storage-details summary small {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 500;
+}
+
+.storage-details-body {
+  border-top: 1px solid var(--line);
+}
+
 .local-audio-row {
   display: grid;
   grid-template-columns: minmax(160px, 1fr) auto;
   align-items: center;
   gap: 12px;
-  border-top: 1px solid var(--line);
   padding: 10px 16px;
   background: white;
 }
 
-.recorder-panel > .muted {
+.recording-message {
   margin: 0;
-  padding: 8px 16px 0;
+  padding: 10px 16px;
+  border-top: 1px solid var(--line);
   font-size: 12px;
 }
 
 .recorder-facts {
   justify-content: flex-start;
   gap: 6px;
-  padding: 8px 16px 14px;
+  padding: 0 16px 12px;
 }
 
 .recorder-facts span {
@@ -850,7 +910,7 @@ a {
 }
 
 .segmented-control button[aria-selected="true"] {
-  background: #1f2933;
+  background: var(--accent);
   color: white;
 }
 
@@ -1051,12 +1111,16 @@ a {
     font-size: 18px;
   }
 
+  .workspace-label {
+    font-size: 11px;
+  }
+
   .full-workbench > .panel-header p {
     font-size: 12px;
   }
 
   .full-workbench > .panel-body {
-    padding: 0 0 20px;
+    padding: 12px 0 96px;
   }
 
   .layout {
@@ -1069,27 +1133,52 @@ a {
   }
 
   .current-meeting {
-    align-items: flex-start;
-    flex-direction: column;
+    align-items: center;
+    flex-direction: row;
     margin: 0 12px 10px;
     padding: 9px 11px;
   }
 
   .recorder-panel {
+    overflow: visible;
     border-right: 0;
     border-left: 0;
     border-radius: 0;
   }
 
-  .recorder-panel > .toolbar {
+  .recording-controls {
+    position: fixed;
+    right: 0;
+    bottom: 0;
+    left: 0;
+    z-index: 30;
     display: grid;
     grid-template-columns: 1.25fr 1fr 0.8fr 0.8fr;
+    gap: 7px;
+    padding: 8px 12px calc(8px + env(safe-area-inset-bottom));
+    border-top: 1px solid var(--line-strong);
+    background: rgba(255, 255, 255, 0.98);
+    box-shadow: 0 -8px 24px rgba(24, 34, 48, 0.1);
+    backdrop-filter: blur(12px);
   }
 
-  .recorder-panel > .toolbar .button {
+  .recording-controls .button {
     min-width: 0;
+    min-height: 44px;
     padding: 0 6px;
     font-size: 12px;
+  }
+
+  .storage-details summary {
+    min-height: 44px;
+    padding: 0 14px;
+  }
+
+  .storage-details summary small {
+    overflow: hidden;
+    max-width: 145px;
+    text-overflow: ellipsis;
+    white-space: nowrap;
   }
 
   .segment {
@@ -1123,25 +1212,6 @@ a {
 
   .pane-heading {
     height: max-content;
-  }
-
-  .mobile-recorder {
-    position: fixed;
-    left: 12px;
-    right: 12px;
-    bottom: 12px;
-    z-index: 20;
-    display: flex;
-    gap: 8px;
-    padding: 10px;
-    border: 1px solid var(--line);
-    border-radius: 8px;
-    background: white;
-    box-shadow: 0 12px 30px rgba(22, 32, 42, 0.16);
-  }
-
-  .mobile-recorder .button {
-    flex: 1;
   }
 
   .editor-heading {

@@ -95,7 +95,7 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
       <header className="topbar">
         <div className="brand">
           <strong>MeetingLoop AI</strong>
-          <span>{workspace.organization.name} · {workspace.user.displayName}</span>
+          <span>{workspace.user.displayName}</span>
         </div>
         <form action={logoutAction}>
           <button className="button secondary" type="submit">로그아웃</button>
@@ -105,6 +105,7 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
       <section className="panel primary-panel full-workbench" aria-label="녹음 회의록 작업대">
         <div className="panel-header">
           <div>
+            <span className="workspace-label">{workspace.organization.name}</span>
             <h1>녹음 회의록</h1>
             <p className="muted">녹음 종료 후 파일은 내 PC에 저장하고, 수정한 전사 TXT와 최종 AI 분석 보고서만 서버에 기록합니다.</p>
           </div>

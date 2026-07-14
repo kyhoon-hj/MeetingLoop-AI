@@ -801,7 +801,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       <div className="level-meter" aria-label={`입력 레벨 ${level}%`}>
         <span style={{ width: `${level}%` }} />
       </div>
-      <div className="toolbar" aria-label="브라우저 녹음 제어">
+      <div className="toolbar recording-controls" aria-label="브라우저 녹음 제어">
         <button className="button" type="button" onClick={startRecording} disabled={!canStart}>
           {state === "requesting" ? "권한 확인 중" : "녹음 시작"}
         </button>
@@ -820,27 +820,34 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
           녹음 파일 저장
         </a>
       ) : null}
-      <div className="local-audio-row">
-        <div className="upload-meter" aria-label={`업로드 진행률 ${uploadProgress}%`}>
-          <span style={{ width: `${uploadProgress}%` }} />
+      <p className="muted recording-message">{message}</p>
+      <details className="storage-details">
+        <summary>
+          <span>로컬 음성 관리</span>
+          <small>{chunkCount}개 청크 · {storedBytes.toLocaleString("ko-KR")} bytes</small>
+        </summary>
+        <div className="storage-details-body">
+          <div className="local-audio-row">
+            <div className="upload-meter" aria-label={`업로드 진행률 ${uploadProgress}%`}>
+              <span style={{ width: `${uploadProgress}%` }} />
+            </div>
+            <div className="toolbar">
+              <button className="button secondary" type="button" onClick={confirmLocalChunks} disabled={uploadState === "uploading"}>
+                {uploadState === "failed" ? "로컬 보관 재확인" : "로컬 음성 보관 확인"}
+              </button>
+              <button className="button danger" type="button" aria-label="로컬 원본 음성 삭제" onClick={deleteLocalAudio} disabled={state === "recording" || state === "paused"}>
+                원본 삭제
+              </button>
+            </div>
+          </div>
+          <div className="recorder-facts">
+            <span>임시 청크 {chunkCount}개</span>
+            <span>로컬 확인 {uploadedChunks}개</span>
+            <span>진행률 {uploadProgress}%</span>
+            <span>{uploadState === "complete" ? "로컬 보관 확인" : uploadState === "failed" ? "재확인 대기" : state === "error" ? "파일 업로드 대안 필요" : "IndexedDB 로컬 보관"}</span>
+          </div>
         </div>
-        <div className="toolbar">
-          <button className="button secondary" type="button" onClick={confirmLocalChunks} disabled={uploadState === "uploading"}>
-            {uploadState === "failed" ? "로컬 보관 재확인" : "로컬 음성 보관 확인"}
-          </button>
-          <button className="button danger" type="button" aria-label="로컬 원본 음성 삭제" onClick={deleteLocalAudio} disabled={state === "recording" || state === "paused"}>
-            원본 삭제
-          </button>
-        </div>
-      </div>
-      <p className="muted">{message}</p>
-      <div className="recorder-facts">
-        <span>임시 청크 {chunkCount}개</span>
-        <span>로컬 확인 {uploadedChunks}개</span>
-        <span>진행률 {uploadProgress}%</span>
-        <span>{storedBytes.toLocaleString("ko-KR")} bytes</span>
-        <span>{uploadState === "complete" ? "로컬 보관 확인" : uploadState === "failed" ? "재확인 대기" : state === "error" ? "파일 업로드 대안 필요" : "IndexedDB 로컬 보관"}</span>
-      </div>
+      </details>
       <div className="workspace-tabs segmented-control" role="tablist" aria-label="회의록 작업 화면">
         <button
           type="button"

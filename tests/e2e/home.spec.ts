@@ -43,6 +43,7 @@ test("records transcript text and finalizes an AI report in the simplified workb
   await expect(page.getByRole("button", { name: "일시 중지" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "재개" })).toBeDisabled();
   await expect(page.getByRole("button", { name: "종료" })).toBeDisabled();
+  await page.getByText("로컬 음성 관리", { exact: true }).click();
   await expect(page.getByRole("button", { name: "로컬 음성 보관 확인" })).toBeEnabled();
   await expect(page.getByRole("button", { name: "로컬 원본 음성 삭제" })).toBeEnabled();
 
