@@ -541,6 +541,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const canPause = state === "recording";
   const canResume = state === "paused";
   const canStop = state === "recording" || state === "paused";
+  const visibleTranscript = [...liveTranscript].reverse();
 
   return (
     <section className="recorder-panel" aria-label="브라우저 녹음">
@@ -589,7 +590,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
           </div>
         </div>
         <div className="live-segment-list">
-          {liveTranscript.map((segment, index) => (
+          {visibleTranscript.map((segment, index) => (
             <article className="live-segment" key={segment.id}>
               <div className="live-segment-meta">
                 <span>{segment.timecode}</span>
