@@ -5,9 +5,14 @@ import { getDemoSession } from "@meetingloop/db";
 export const sessionCookieName = "meetingloop_session";
 
 export function getSessionSecret(): string {
-  return process.env.SESSION_SECRET && process.env.SESSION_SECRET !== "replace-with-long-random-value"
-    ? process.env.SESSION_SECRET
-    : "meetingloop-local-development-secret";
+  const secret = process.env.SESSION_SECRET;
+  if (secret && secret !== "replace-with-long-random-value") {
+    return secret;
+  }
+  if (process.env.NODE_ENV === "production") {
+    throw new Error("SESSION_SECRET must be configured in production");
+  }
+  return "meetingloop-local-development-secret";
 }
 
 export async function getSessionPayload(): Promise<SessionPayload | null> {

@@ -23,6 +23,34 @@ pnpm test:e2e
 pnpm build
 ```
 
+## EC2 Docker 데모 배포
+
+현재 Docker 구성은 애플리케이션 데이터를 프로세스 메모리에 저장하는 데모 배포입니다. 컨테이너를 재시작하거나 새 이미지로 교체하면 가입 사용자, 프로젝트, 회의 데이터가 초기화됩니다.
+
+EC2에 Docker Engine과 Compose 플러그인을 설치한 뒤 저장소 루트에서 실행합니다.
+
+```bash
+cp .env.docker.example .env.docker
+openssl rand -base64 48
+```
+
+생성한 값을 `.env.docker`의 `SESSION_SECRET`에 넣고 `APP_URL`, AI 제공자 설정을 수정합니다. 그다음 이미지를 빌드하고 실행합니다.
+
+```bash
+docker compose -f compose.ec2.yml up -d --build
+docker compose -f compose.ec2.yml ps
+docker compose -f compose.ec2.yml logs -f web
+```
+
+EC2 보안 그룹에서 테스트할 클라이언트에 대해서만 TCP 3101 인바운드를 허용하면 `http://EC2_PUBLIC_IP:3101`으로 접속할 수 있습니다. 컨테이너 내부에서는 3000번 포트를 사용하고 EC2의 3101번 포트로 전달합니다. 브라우저 마이크 녹음은 HTTPS가 필요하므로 실제 녹음 테스트에는 Nginx 또는 Application Load Balancer와 인증서를 연결해야 합니다.
+
+배포 갱신은 최신 코드를 받은 뒤 다시 빌드합니다.
+
+```bash
+git pull
+docker compose -f compose.ec2.yml up -d --build
+```
+
 ## 무료 AI 회의록
 
 회의록 생성은 데모 문구가 아닌 실제 AI 제공자를 사용합니다. 기본값은 원본 음성과 전사 TXT를 외부 AI에 보내지 않는 Ollama 로컬 모드입니다.

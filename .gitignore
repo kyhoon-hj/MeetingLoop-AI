@@ -17,6 +17,7 @@ playwright-report/
 .env
 .env.*
 !.env.example
+!.env.docker.example
 
 # Codex/local agent state
 .agents/
