@@ -871,7 +871,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
               <strong>회의록 및 AI 보고서</strong>
               <p className="muted">{minutesMessage}</p>
             </div>
-            <button className="button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
+            <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
               {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
             </button>
           </div>
