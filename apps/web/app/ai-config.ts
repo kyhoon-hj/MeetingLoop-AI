@@ -1,4 +1,11 @@
-import { createMinutesProvider, type MinutesProvider, type MinutesProviderKind } from "@meetingloop/ai";
+import {
+  createMinutesProvider,
+  GeminiAudioTranscriptionProvider,
+  MockAudioTranscriptionProvider,
+  type AudioTranscriptionProvider,
+  type MinutesProvider,
+  type MinutesProviderKind
+} from "@meetingloop/ai";
 
 export type AiAnalysisMode = "ollama" | "gemini";
 
@@ -54,6 +61,26 @@ export function configuredMinutesProvider(requestedMode: AiAnalysisMode): {
     }),
     kind,
     model
+  };
+}
+
+export function configuredAudioTranscriptionProvider(): {
+  provider: AudioTranscriptionProvider;
+  kind: "mock" | "gemini";
+  model: string;
+} {
+  const config = environment();
+  const provider = config.activeProvider === "mock"
+    ? new MockAudioTranscriptionProvider()
+    : new GeminiAudioTranscriptionProvider({
+      apiKey: config.geminiApiKey,
+      model: config.geminiModel
+    });
+
+  return {
+    provider,
+    kind: provider.kind,
+    model: provider.model
   };
 }
 

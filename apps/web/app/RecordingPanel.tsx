@@ -102,6 +102,22 @@ interface AiStatus {
   gemini: AiProviderState;
 }
 
+interface ImportedAudioAnalysis {
+  file: { name: string; size: number; mimeType: string };
+  provider: { kind: "mock" | AiAnalysisMode; model: string };
+  analysisInput: { source: "IMPORTED_AUDIO"; segmentCount: number };
+  transcript: Array<{
+    id: string;
+    sequence: number;
+    speakerLabel: string;
+    startMs: number;
+    endMs: number;
+    rawText: string;
+    editedText: string;
+  }>;
+  minutes: MinutesDraft;
+}
+
 declare global {
   interface Window {
     SpeechRecognition?: new () => LiveSpeechRecognition;
@@ -113,6 +129,7 @@ const databaseName = "meetingloop-recordings";
 const storeName = "chunks";
 const microphoneRequestTimeoutMs = 30_000;
 const speechTurnGapMs = 900;
+const maxInlineAudioBytes = 14 * 1024 * 1024;
 const defaultParticipants: ParticipantProfile[] = [
   { id: "speaker-1", name: "화자 1" },
   { id: "speaker-2", name: "화자 2" }
@@ -287,6 +304,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [aiStatusMessage, setAiStatusMessage] = useState("AI 연결 상태를 확인하고 있습니다.");
   const [isGeneratingMinutes, setIsGeneratingMinutes] = useState(false);
+  const [isAnalyzingAudioFile, setIsAnalyzingAudioFile] = useState(false);
+  const [audioImportMessage, setAudioImportMessage] = useState("최대 14MB · AI 분석 중 Gemini로 전송, 앱 서버에는 미보관");
   const [isFinalizingMinutes, setIsFinalizingMinutes] = useState(false);
   const [finalRecordMessage, setFinalRecordMessage] = useState("AI 분석 보고서를 수정한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
   const [recordingFileUrl, setRecordingFileUrl] = useState<string | null>(null);
@@ -304,6 +323,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const recognitionDraftsRef = useRef<Map<number, RecognitionDraftState>>(new Map());
   const recordedChunksRef = useRef<Blob[]>([]);
   const minutesPaneRef = useRef<HTMLElement | null>(null);
+  const audioFileInputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     if (state !== "recording") {
@@ -899,6 +919,86 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     }
   }
 
+  async function analyzeExistingAudioFile(file: File) {
+    if (!meetingId) {
+      setAudioImportMessage("회의를 먼저 만든 뒤 기존 녹음 파일을 분석할 수 있습니다.");
+      return;
+    }
+    if (file.size === 0) {
+      setAudioImportMessage("선택한 녹음 파일이 비어 있습니다.");
+      return;
+    }
+    if (file.size > maxInlineAudioBytes) {
+      setAudioImportMessage("녹음 파일은 최대 14MB까지 분석할 수 있습니다.");
+      return;
+    }
+
+    setIsAnalyzingAudioFile(true);
+    setAudioImportMessage(`${file.name}에서 음성과 화자를 분석하고 있습니다.`);
+    setMinutesMessage("기존 녹음 파일을 전사한 뒤 Gemini가 AI 보고서를 만들고 있습니다.");
+    try {
+      const formData = new FormData();
+      formData.append("audio", file);
+      formData.append("meetingId", meetingId);
+      formData.append("participantNames", JSON.stringify(
+        participantsRef.current.map((participant) => participant.name.trim()).filter(Boolean)
+      ));
+
+      const response = await fetch("/api/recordings/analyze-file", {
+        method: "POST",
+        body: formData
+      });
+      if (!response.ok) {
+        const errorPayload = await response.json().catch(() => null) as { message?: string } | null;
+        const errorMessage = errorPayload?.message ?? "녹음 파일 AI 분석에 실패했습니다. 잠시 후 다시 시도해 주세요.";
+        setAudioImportMessage(errorMessage);
+        setMinutesMessage(errorMessage);
+        return;
+      }
+
+      const payload = await response.json() as ImportedAudioAnalysis;
+      const speakerLabels = Array.from(new Set(
+        payload.transcript.map((segment) => segment.speakerLabel.trim()).filter(Boolean)
+      )).slice(0, 8);
+      const importedParticipants: ParticipantProfile[] = (speakerLabels.length > 0 ? speakerLabels : ["화자 1"])
+        .map((name, index) => ({ id: `speaker-${index + 1}`, name }));
+      const speakerIds = new Map(importedParticipants.map((participant) => [participant.name, participant.id]));
+      const fallbackParticipant = importedParticipants[0] ?? defaultParticipants[0]!;
+      const importedTranscript: LiveTranscriptSegment[] = payload.transcript.map((segment) => ({
+        id: segment.id,
+        timecode: formatElapsed(Math.floor(segment.startMs / 1000)),
+        speakerId: speakerIds.get(segment.speakerLabel) ?? fallbackParticipant.id,
+        speaker: segment.speakerLabel,
+        rawText: segment.rawText,
+        text: segment.editedText,
+        status: "saved"
+      }));
+
+      participantsRef.current = importedParticipants;
+      setParticipants(importedParticipants);
+      activeParticipantIdRef.current = fallbackParticipant.id;
+      setActiveParticipantId(fallbackParticipant.id);
+      setLiveTranscript(importedTranscript);
+      setTranscriptMessage(`녹음 파일에서 전사 문장 ${payload.analysisInput.segmentCount}개를 생성해 회의에 저장했습니다.`);
+      setMinutesDraft(payload.minutes);
+      if (payload.provider.kind === "gemini") {
+        setAnalysisMode("gemini");
+      }
+      setWorkspaceView("minutes");
+      setFinalRecordMessage("AI 분석 보고서를 검토하고 수정한 뒤 최종 서버 저장 기록을 남겨주세요.");
+      setAudioImportMessage(`${payload.file.name} · TXT ${payload.analysisInput.segmentCount}개 · 원본 파일은 서버에 저장하지 않았습니다. AI 분석 중 Gemini로만 전송했습니다.`);
+      const providerLabel = payload.provider.kind === "gemini" ? "Gemini" : "테스트 분석기";
+      setMinutesMessage(`${payload.file.name}에서 전사 TXT ${payload.analysisInput.segmentCount}개를 만들고 ${providerLabel} (${payload.provider.model})가 보고서를 생성했습니다.`);
+      window.requestAnimationFrame(() => minutesPaneRef.current?.scrollTo({ top: 0 }));
+    } catch {
+      const errorMessage = "녹음 파일 분석 서버에 연결하지 못했습니다. 연결 상태를 확인해 주세요.";
+      setAudioImportMessage(errorMessage);
+      setMinutesMessage(errorMessage);
+    } finally {
+      setIsAnalyzingAudioFile(false);
+    }
+  }
+
   async function refreshAiStatus() {
     setAiStatusMessage("AI 연결 상태를 다시 확인하고 있습니다.");
     try {
@@ -1000,6 +1100,31 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
           녹음 파일 저장
         </a>
       ) : null}
+      <div className="audio-import-row">
+        <input
+          ref={audioFileInputRef}
+          className="audio-file-input"
+          type="file"
+          aria-label="기존 녹음 파일 선택"
+          accept="audio/*,.mp3,.m4a,.wav,.webm,.ogg,.aac,.flac,.mp4"
+          onChange={(event) => {
+            const file = event.target.files?.[0];
+            event.target.value = "";
+            if (file) {
+              void analyzeExistingAudioFile(file);
+            }
+          }}
+        />
+        <button
+          className="button secondary audio-import-button"
+          type="button"
+          onClick={() => audioFileInputRef.current?.click()}
+          disabled={isAnalyzingAudioFile || isGeneratingMinutes || state === "requesting" || state === "recording" || state === "paused"}
+        >
+          {isAnalyzingAudioFile ? "녹음 파일 분석 중" : "기존 녹음 파일 AI 분석"}
+        </button>
+        <span className="muted" role="status" aria-live="polite">{audioImportMessage}</span>
+      </div>
       <p className="muted recording-message">{message}</p>
       <details className="participant-details">
         <summary>
@@ -1092,7 +1217,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
               <strong>회의록 및 AI 보고서</strong>
               <p className="muted">{minutesMessage}</p>
             </div>
-            <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
+            <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || isAnalyzingAudioFile || !analysisAvailable}>
               {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
             </button>
           </div>

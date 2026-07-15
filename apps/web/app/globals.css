@@ -637,6 +637,36 @@ a {
   margin: 0 16px 12px;
 }
 
+.audio-import-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 0 16px 12px;
+  background: #fbfcfd;
+}
+
+.audio-file-input {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.audio-import-button {
+  flex: 0 0 auto;
+}
+
+.audio-import-row span {
+  min-width: 0;
+  overflow: hidden;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .storage-details,
 .participant-details {
   border-top: 1px solid var(--line);
@@ -1147,6 +1177,7 @@ a {
 .ai-generate-button {
   border-color: var(--info);
   background: var(--info);
+  white-space: nowrap;
 }
 
 .ai-generate-button:hover:not(:disabled) {
@@ -1306,6 +1337,21 @@ a {
     min-height: 44px;
     padding: 0 6px;
     font-size: 12px;
+  }
+
+  .audio-import-row {
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
+    padding: 2px 14px 12px;
+  }
+
+  .audio-import-button {
+    width: 100%;
+  }
+
+  .audio-import-row span {
+    white-space: normal;
   }
 
   .storage-details summary,

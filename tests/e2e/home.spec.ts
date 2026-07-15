@@ -166,6 +166,29 @@ test("records transcript text and finalizes an AI report in the simplified workb
   await expect(report).toContainText("최종 서버 저장 기록을 남겼습니다.");
 });
 
+test("turns an existing recording file into transcript text and an AI report", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "로그인" }).click();
+
+  await page.getByLabel("기존 녹음 파일 선택").setInputFiles({
+    name: "existing-meeting.webm",
+    mimeType: "audio/webm",
+    buffer: Buffer.from("fake-webm-audio")
+  });
+
+  const report = page.getByRole("region", { name: "AI 분석 보고서" });
+  await expect(report).toContainText("existing-meeting.webm에서 전사 TXT 1개를 만들고");
+  await expect(report.getByRole("textbox", { name: "요약", exact: true })).toHaveValue(/기존 녹음 파일에서 전사한 테스트 문장입니다/);
+  await expect(page.getByText("원본 파일은 서버에 저장하지 않았습니다.")).toBeVisible();
+
+  const transcriptTab = page.getByRole("tab", { name: "실시간 TXT" });
+  if (await transcriptTab.isVisible()) {
+    await transcriptTab.click();
+  }
+  await expect(page.getByRole("textbox", { name: "전사 문장 1" })).toHaveValue("기존 녹음 파일에서 전사한 테스트 문장입니다.");
+  await expect(page.getByRole("button", { name: "기존 녹음 파일 AI 분석" })).toBeEnabled();
+});
+
 test("registers a new organization into the same recording-first workbench", async ({ page }, testInfo) => {
   await page.goto("/");
 
