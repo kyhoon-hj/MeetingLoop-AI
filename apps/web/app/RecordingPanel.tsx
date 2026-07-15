@@ -38,6 +38,7 @@ interface LiveSpeechRecognition {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
+  maxAlternatives: number;
   onresult: ((event: LiveTranscriptEvent) => void) | null;
   onerror: (() => void) | null;
   onend: (() => void) | null;
@@ -48,10 +49,23 @@ interface LiveSpeechRecognition {
 interface LiveTranscriptSegment {
   id: string;
   timecode: string;
+  speakerId: string;
   speaker: string;
   rawText: string;
   text: string;
   status: TranscriptStatus;
+}
+
+interface ParticipantProfile {
+  id: string;
+  name: string;
+}
+
+interface RecognitionDraftState {
+  segmentId: string;
+  sourceText: string;
+  committedPrefix: string;
+  lastUpdatedAt: number;
 }
 
 interface MinutesDraft {
@@ -98,11 +112,17 @@ declare global {
 const databaseName = "meetingloop-recordings";
 const storeName = "chunks";
 const microphoneRequestTimeoutMs = 30_000;
+const speechTurnGapMs = 900;
+const defaultParticipants: ParticipantProfile[] = [
+  { id: "speaker-1", name: "화자 1" },
+  { id: "speaker-2", name: "화자 2" }
+];
 const initialLiveTranscript: LiveTranscriptSegment[] = [
   {
     id: "intro",
     timecode: "00:00",
-    speaker: "화자 A",
+    speakerId: "speaker-1",
+    speaker: "화자 1",
     rawText: "녹음을 시작하면 이 영역에 실시간 전사 초안이 표시됩니다. 잘못 인식된 문장은 바로 수정하거나 삭제할 수 있습니다.",
     text: "녹음을 시작하면 이 영역에 실시간 전사 초안이 표시됩니다. 잘못 인식된 문장은 바로 수정하거나 삭제할 수 있습니다.",
     status: "draft"
@@ -128,7 +148,14 @@ function requestMicrophoneStream(): Promise<MediaStream> {
       reject(new DOMException("Microphone permission request timed out", "TimeoutError"));
     }, microphoneRequestTimeoutMs);
 
-    navigator.mediaDevices.getUserMedia({ audio: true }).then((stream) => {
+    navigator.mediaDevices.getUserMedia({
+      audio: {
+        autoGainControl: true,
+        channelCount: 1,
+        echoCancellation: true,
+        noiseSuppression: true
+      }
+    }).then((stream) => {
       if (settled) {
         stream.getTracks().forEach((track) => track.stop());
         return;
@@ -249,6 +276,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const [uploadedChunks, setUploadedChunks] = useState(0);
   const [uploadState, setUploadState] = useState<UploadState>("idle");
   const [uploadProgress, setUploadProgress] = useState(0);
+  const [participants, setParticipants] = useState<ParticipantProfile[]>(defaultParticipants);
+  const [activeParticipantId, setActiveParticipantId] = useState(defaultParticipants[0]?.id ?? "speaker-1");
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptSegment[]>(initialLiveTranscript);
   const [transcriptMessage, setTranscriptMessage] = useState("실시간 전사 초안은 저장 전까지 자유롭게 수정할 수 있습니다.");
   const [minutesDraft, setMinutesDraft] = useState<MinutesDraft | null>(null);
@@ -266,10 +295,13 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const levelTimerRef = useRef<number | null>(null);
+  const elapsedSecondsRef = useRef(0);
+  const participantsRef = useRef<ParticipantProfile[]>(defaultParticipants);
+  const activeParticipantIdRef = useRef(activeParticipantId);
   const recognitionRef = useRef<LiveSpeechRecognition | null>(null);
   const recognitionShouldRunRef = useRef(false);
   const recordingRequestIdRef = useRef(0);
-  const liveDraftIdRef = useRef<string | null>(null);
+  const recognitionDraftsRef = useRef<Map<number, RecognitionDraftState>>(new Map());
   const recordedChunksRef = useRef<Blob[]>([]);
   const minutesPaneRef = useRef<HTMLElement | null>(null);
 
@@ -279,7 +311,11 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     }
 
     const timer = window.setInterval(() => {
-      setElapsedSeconds((value) => value + 1);
+      setElapsedSeconds((value) => {
+        const nextValue = value + 1;
+        elapsedSecondsRef.current = nextValue;
+        return nextValue;
+      });
       setLevel(Math.floor(30 + Math.random() * 65));
     }, 1000);
     levelTimerRef.current = timer;
@@ -288,6 +324,14 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       window.clearInterval(timer);
     };
   }, [state]);
+
+  useEffect(() => {
+    participantsRef.current = participants;
+  }, [participants]);
+
+  useEffect(() => {
+    activeParticipantIdRef.current = activeParticipantId;
+  }, [activeParticipantId]);
 
   useEffect(() => {
     let active = true;
@@ -327,34 +371,89 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     }
   }, [recordingFileUrl]);
 
-  function upsertLiveDraft(text: string, isFinal: boolean) {
+  function writeRecognitionSegment(segmentId: string, text: string, isFinal: boolean) {
     const cleanText = text.trim();
     if (!cleanText) {
       return;
     }
 
-    const existingId = liveDraftIdRef.current;
-    const nextId = existingId ?? `segment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
-    liveDraftIdRef.current = isFinal ? null : nextId;
+    const speakerId = activeParticipantIdRef.current;
+    const speaker = participantsRef.current.find((participant) => participant.id === speakerId)?.name.trim() || "화자";
     setLiveTranscript((segments) => {
       const withoutIntro = segments.filter((segment) => segment.id !== "intro");
-      const existing = withoutIntro.find((segment) => segment.id === nextId);
+      const existing = withoutIntro.find((segment) => segment.id === segmentId);
       if (existing) {
         return withoutIntro.map((segment) => (
-          segment.id === nextId
-            ? { ...segment, text: cleanText, status: isFinal ? "saved" : "draft" }
+          segment.id === segmentId
+            ? { ...segment, rawText: cleanText, text: cleanText, status: isFinal ? "saved" : "draft" }
             : segment
         ));
       }
       return [...withoutIntro, {
-        id: nextId,
-        timecode: formatElapsed(elapsedSeconds),
-        speaker: "화자 A",
+        id: segmentId,
+        timecode: formatElapsed(elapsedSecondsRef.current),
+        speakerId,
+        speaker,
         rawText: cleanText,
         text: cleanText,
         status: isFinal ? "saved" : "draft"
       }];
     });
+  }
+
+  function upsertRecognitionDraft(resultIndex: number, text: string, isFinal: boolean) {
+    const cleanText = text.trim();
+    if (!cleanText) {
+      return;
+    }
+
+    const now = Date.now();
+    const currentDraft = recognitionDraftsRef.current.get(resultIndex);
+    let segmentId = currentDraft?.segmentId ?? `segment-${now}-${Math.random().toString(16).slice(2)}`;
+    let committedPrefix = currentDraft?.committedPrefix ?? "";
+    let visibleText = committedPrefix && cleanText.startsWith(committedPrefix)
+      ? cleanText.slice(committedPrefix.length).trimStart()
+      : cleanText;
+
+    if (currentDraft && now - currentDraft.lastUpdatedAt >= speechTurnGapMs) {
+      const appendedText = cleanText.startsWith(currentDraft.sourceText)
+        ? cleanText.slice(currentDraft.sourceText.length).trim()
+        : "";
+      if (appendedText) {
+        setLiveTranscript((segments) => segments.map((segment) => (
+          segment.id === currentDraft.segmentId ? { ...segment, status: "saved" } : segment
+        )));
+        segmentId = `segment-${now}-${Math.random().toString(16).slice(2)}`;
+        committedPrefix = currentDraft.sourceText;
+        visibleText = appendedText;
+      }
+    }
+
+    writeRecognitionSegment(segmentId, visibleText, isFinal);
+    if (isFinal) {
+      recognitionDraftsRef.current.delete(resultIndex);
+    } else {
+      recognitionDraftsRef.current.set(resultIndex, {
+        segmentId,
+        sourceText: cleanText,
+        committedPrefix,
+        lastUpdatedAt: now
+      });
+    }
+  }
+
+  function finalizeLiveDrafts() {
+    const draftIds = new Set(
+      Array.from(recognitionDraftsRef.current.values(), (draft) => draft.segmentId)
+    );
+    if (draftIds.size === 0) {
+      return;
+    }
+
+    recognitionDraftsRef.current.clear();
+    setLiveTranscript((segments) => segments.map((segment) => (
+      draftIds.has(segment.id) ? { ...segment, status: "saved" } : segment
+    )));
   }
 
   function startLiveRecognition() {
@@ -368,24 +467,29 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "ko-KR";
+    recognition.maxAlternatives = 1;
     recognition.onresult = (event) => {
-      let text = "";
-      let isFinal = false;
+      let finalizedCount = 0;
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
         const alternative = result?.[0];
         if (alternative?.transcript) {
-          text += alternative.transcript;
-          isFinal = isFinal || result?.isFinal === true;
+          const isFinal = result?.isFinal === true;
+          upsertRecognitionDraft(index, alternative.transcript, isFinal);
+          if (isFinal) {
+            finalizedCount += 1;
+          }
         }
       }
-      upsertLiveDraft(text, isFinal);
-      setTranscriptMessage(isFinal ? "확정된 전사 문장을 저장했습니다. 필요하면 바로 수정하세요." : "말하는 내용을 실시간 전사 초안으로 받고 있습니다.");
+      setTranscriptMessage(finalizedCount > 0
+        ? `빠른 발화에서 확정된 문장 ${finalizedCount}개를 보존했습니다. 필요하면 바로 수정하세요.`
+        : "말하는 내용을 실시간 전사 초안으로 받고 있습니다.");
     };
     recognition.onerror = () => {
       setTranscriptMessage("실시간 전사 중 오류가 발생했습니다. 녹음 파일은 계속 저장되며, 문장은 직접 추가할 수 있습니다.");
     };
     recognition.onend = () => {
+      finalizeLiveDrafts();
       if (recognitionShouldRunRef.current) {
         try {
           recognition.start();
@@ -408,6 +512,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
 
   function stopLiveRecognition() {
     recognitionShouldRunRef.current = false;
+    finalizeLiveDrafts();
     recognitionRef.current?.stop();
   }
 
@@ -452,7 +557,9 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       setUploadedChunks(0);
       setUploadProgress(0);
       setUploadState("idle");
+      elapsedSecondsRef.current = 0;
       setElapsedSeconds(0);
+      recognitionDraftsRef.current.clear();
       setLiveTranscript([]);
       setWorkspaceView("transcript");
       setTranscriptMessage("말하는 내용이 전사 초안으로 표시됩니다. 잘못된 문장은 바로 고칠 수 있습니다.");
@@ -487,7 +594,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
           setMessage("녹음이 종료되었습니다. 저장할 음성 데이터가 없으면 전사 TXT만 정리할 수 있습니다.");
         }
       };
-      recorder.start(5000);
+      recorder.start(1000);
       startLiveRecognition();
       setState("recording");
     } catch (error) {
@@ -577,11 +684,71 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     }
   }
 
+  function changeParticipantCount(count: number) {
+    const nextCount = Math.min(8, Math.max(1, count));
+    const nextParticipants = Array.from({ length: nextCount }, (_, index) => (
+      participants[index] ?? { id: `speaker-${index + 1}`, name: `화자 ${index + 1}` }
+    ));
+    participantsRef.current = nextParticipants;
+    setParticipants(nextParticipants);
+    if (!nextParticipants.some((participant) => participant.id === activeParticipantIdRef.current)) {
+      const nextActiveId = nextParticipants[0]?.id ?? "speaker-1";
+      activeParticipantIdRef.current = nextActiveId;
+      setActiveParticipantId(nextActiveId);
+    }
+  }
+
+  function updateParticipantName(participantId: string, name: string) {
+    setParticipants((currentParticipants) => {
+      const nextParticipants = currentParticipants.map((participant) => (
+        participant.id === participantId ? { ...participant, name } : participant
+      ));
+      participantsRef.current = nextParticipants;
+      return nextParticipants;
+    });
+    setLiveTranscript((segments) => segments.map((segment) => (
+      segment.speakerId === participantId ? { ...segment, speaker: name } : segment
+    )));
+  }
+
+  function selectActiveParticipant(participantId: string) {
+    if (participantId === activeParticipantIdRef.current) {
+      return;
+    }
+    finalizeLiveDrafts();
+    activeParticipantIdRef.current = participantId;
+    setActiveParticipantId(participantId);
+    if (mediaRecorderRef.current?.state === "recording" && recognitionRef.current) {
+      const previousRecognition = recognitionRef.current;
+      recognitionShouldRunRef.current = false;
+      previousRecognition.onresult = null;
+      previousRecognition.onerror = null;
+      previousRecognition.onend = null;
+      previousRecognition.stop();
+      recognitionRef.current = null;
+      window.setTimeout(() => {
+        if (mediaRecorderRef.current?.state === "recording") {
+          startLiveRecognition();
+        }
+      }, 120);
+    }
+  }
+
+  function assignTranscriptSpeaker(segmentId: string, participantId: string) {
+    const speaker = participantsRef.current.find((participant) => participant.id === participantId)?.name.trim() || "화자";
+    setLiveTranscript((segments) => segments.map((segment) => (
+      segment.id === segmentId ? { ...segment, speakerId: participantId, speaker, status: "draft" } : segment
+    )));
+  }
+
   function addManualTranscriptSegment() {
+    const speakerId = activeParticipantIdRef.current;
+    const speaker = participantsRef.current.find((participant) => participant.id === speakerId)?.name.trim() || "화자";
     setLiveTranscript((segments) => [...segments.filter((segment) => segment.id !== "intro"), {
       id: `segment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      timecode: formatElapsed(elapsedSeconds),
-      speaker: "화자 A",
+      timecode: formatElapsed(elapsedSecondsRef.current),
+      speakerId,
+      speaker,
       rawText: "새 전사 문장을 입력하세요.",
       text: "새 전사 문장을 입력하세요.",
       status: "draft"
@@ -598,7 +765,15 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   function deleteTranscriptSegment(id: string) {
     setLiveTranscript((segments) => {
       const nextSegments = segments.filter((segment) => segment.id !== id);
-      return nextSegments.length > 0 ? nextSegments : initialLiveTranscript;
+      if (nextSegments.length > 0) {
+        return nextSegments;
+      }
+      const firstParticipant = participantsRef.current[0] ?? defaultParticipants[0];
+      return [{
+        ...initialLiveTranscript[0]!,
+        speakerId: firstParticipant?.id ?? "speaker-1",
+        speaker: firstParticipant?.name.trim() || "화자 1"
+      }];
     });
     setTranscriptMessage("선택한 전사 문장을 삭제했습니다.");
   }
@@ -777,7 +952,11 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const canPause = state === "recording";
   const canResume = state === "paused";
   const canStop = state === "recording" || state === "paused";
+  const canChangeParticipantCount = state === "idle" && liveTranscript.every((segment) => segment.id === "intro");
   const visibleTranscript = [...liveTranscript].reverse();
+  const participantSummary = participants
+    .map((participant, index) => participant.name.trim() || `화자 ${index + 1}`)
+    .join(", ");
   const selectedAiStatus = aiStatus?.[analysisMode] ?? null;
   const analysisAvailable = aiStatus?.activeProvider === "mock" || selectedAiStatus?.available === true;
   const recordingStatus = state === "requesting"
@@ -821,6 +1000,40 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         </a>
       ) : null}
       <p className="muted recording-message">{message}</p>
+      <details className="participant-details">
+        <summary>
+          <span>참여자 설정</span>
+          <small>{participants.length}명 · {participantSummary}</small>
+        </summary>
+        <div className="participant-setup">
+          <label className="participant-count-field">
+            참여 인원
+            <select
+              aria-label="참여자 수"
+              value={participants.length}
+              disabled={!canChangeParticipantCount}
+              onChange={(event) => changeParticipantCount(Number(event.target.value))}
+            >
+              {Array.from({ length: 8 }, (_, index) => index + 1).map((count) => (
+                <option key={count} value={count}>{count}명</option>
+              ))}
+            </select>
+          </label>
+          <div className="participant-name-grid">
+            {participants.map((participant, index) => (
+              <label key={participant.id}>
+                <span>{index + 1}</span>
+                <input
+                  aria-label={`참여자 ${index + 1} 이름`}
+                  value={participant.name}
+                  placeholder={`화자 ${index + 1}`}
+                  onChange={(event) => updateParticipantName(participant.id, event.target.value)}
+                />
+              </label>
+            ))}
+          </div>
+        </div>
+      </details>
       <details className="storage-details">
         <summary>
           <span>로컬 음성 관리</span>
@@ -976,12 +1189,44 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
               <button className="button" type="button" onClick={saveTranscriptDraft}>전사 저장</button>
             </div>
           </div>
+          <div className="current-speaker-bar">
+            <span>현재 화자</span>
+            <div className="speaker-choice" role="group" aria-label="현재 화자">
+              {participants.map((participant, index) => (
+                <button
+                  key={participant.id}
+                  type="button"
+                  aria-pressed={activeParticipantId === participant.id}
+                  onClick={() => selectActiveParticipant(participant.id)}
+                >
+                  {participant.name.trim() || `화자 ${index + 1}`}
+                </button>
+              ))}
+            </div>
+          </div>
           <div className="live-segment-list">
             {visibleTranscript.map((segment, index) => (
               <article className="live-segment" key={segment.id}>
                 <div className="live-segment-meta">
                   <span>{segment.timecode}</span>
-                  <span>{segment.speaker}</span>
+                  <select
+                    className="speaker-select"
+                    aria-label={`화자 선택 ${index + 1}`}
+                    value={segment.speakerId}
+                    onChange={(event) => assignTranscriptSpeaker(segment.id, event.target.value)}
+                  >
+                    {participants.map((participant, participantIndex) => (
+                      <option key={participant.id} value={participant.id}>
+                        {participantIndex + 1}
+                      </option>
+                    ))}
+                  </select>
+                  <input
+                    className="speaker-name-input"
+                    aria-label={`화자 이름 ${index + 1}`}
+                    value={segment.speaker}
+                    onChange={(event) => updateParticipantName(segment.speakerId, event.target.value)}
+                  />
                   <span>{segment.status === "saved" ? "저장됨" : "수정 중"}</span>
                   <button
                     className="icon-button delete-segment-button"
