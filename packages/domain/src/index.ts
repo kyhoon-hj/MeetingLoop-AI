@@ -96,7 +96,7 @@ export const registerOrganizationInputSchema = z.object({
   password: z.string().min(8).max(128),
   displayName: z.string().min(1).max(80),
   organizationName: z.string().min(1).max(100),
-  organizationSlug: z.string().min(2).max(40).regex(/^[a-z0-9][a-z0-9-]*$/),
+  organizationSlug: z.string().min(2).max(40).regex(/^[a-z0-9][-a-z0-9]*$/),
   timezone: z.string().default("Asia/Seoul")
 });
 
@@ -196,6 +196,68 @@ export const saveTranscriptSegmentsInputSchema = z.object({
   segments: z.array(transcriptSegmentInputSchema).min(1).max(200)
 });
 
+export const finalTranscriptSegmentInputSchema = z.object({
+  sequence: z.number().int().nonnegative(),
+  speakerLabel: z.string().trim().min(1).max(80),
+  startMs: z.number().int().nonnegative(),
+  endMs: z.number().int().nonnegative(),
+  editedText: z.string().trim().min(1).max(4000),
+  source: z.enum(["LIVE", "MANUAL", "STT"]).default("MANUAL")
+}).strict().refine((segment) => segment.endMs >= segment.startMs, {
+  message: "TRANSCRIPT_SEGMENT_TIME_INVALID",
+  path: ["endMs"]
+});
+
+export const saveTranscriptInputSchema = z.object({
+  organizationId: z.string().min(1),
+  meetingId: z.string().min(1),
+  version: z.number().int().min(0),
+  segments: z.array(finalTranscriptSegmentInputSchema).min(1).max(200)
+}).strict().superRefine((input, context) => {
+  const sequences = new Set<number>();
+  let textLength = 0;
+  for (const [index, segment] of input.segments.entries()) {
+    if (sequences.has(segment.sequence)) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: "TRANSCRIPT_SEQUENCE_DUPLICATED",
+        path: ["segments", index, "sequence"]
+      });
+    }
+    sequences.add(segment.sequence);
+    textLength += segment.editedText.length;
+  }
+  if (textLength > 200_000) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: "TRANSCRIPT_TEXT_TOO_LARGE",
+      path: ["segments"]
+    });
+  }
+});
+
+export const transcriptDocumentSchema = z.object({
+  id: z.string().min(1),
+  organizationId: z.string().min(1),
+  meetingId: z.string().min(1),
+  status: z.literal("CONFIRMED"),
+  version: z.number().int().positive(),
+  confirmedBy: z.string().min(1),
+  confirmedAt: z.string().datetime(),
+  createdAt: z.string().datetime(),
+  updatedAt: z.string().datetime(),
+  segments: z.array(transcriptSegmentSchema)
+});
+
+export const transcriptRevisionSchema = z.object({
+  id: z.string().min(1),
+  transcriptId: z.string().min(1),
+  version: z.number().int().positive(),
+  snapshot: z.record(z.unknown()),
+  changedBy: z.string().min(1),
+  createdAt: z.string().datetime()
+});
+
 export const minutesActionItemSchema = z.object({
   id: z.string().min(1),
   content: z.string().min(1).max(1000),
@@ -262,6 +324,10 @@ export type MeetingMinutes = z.infer<typeof meetingMinutesSchema>;
 export type MinutesActionItem = z.infer<typeof minutesActionItemSchema>;
 export type CreateMeetingInput = z.infer<typeof createMeetingInputSchema>;
 export type SaveTranscriptSegmentsInput = z.infer<typeof saveTranscriptSegmentsInputSchema>;
+export type FinalTranscriptSegmentInput = z.infer<typeof finalTranscriptSegmentInputSchema>;
+export type SaveTranscriptInput = z.infer<typeof saveTranscriptInputSchema>;
+export type TranscriptDocument = z.infer<typeof transcriptDocumentSchema>;
+export type TranscriptRevision = z.infer<typeof transcriptRevisionSchema>;
 export type GenerateMinutesInput = z.infer<typeof generateMinutesInputSchema>;
 
 export function assertSameOrganization(leftOrganizationId: string, rightOrganizationId: string): void {

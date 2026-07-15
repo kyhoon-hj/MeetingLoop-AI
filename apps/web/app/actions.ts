@@ -2,8 +2,9 @@
 
 import { cookies } from "next/headers";
 import { redirect } from "next/navigation";
+import { ZodError } from "zod";
 import { createSessionToken } from "@meetingloop/auth";
-import { archiveDemoProject, authenticateDemoUser, createDemoMeeting, createDemoProject, registerDemoOrganization, restoreDemoProject, updateDemoProject } from "@meetingloop/db";
+import { archiveProject, authenticateUser, createMeeting, createProject, registerOrganization, restoreProject, updateProject } from "@meetingloop/db";
 import { archiveProjectInputSchema, createMeetingInputSchema, createProjectInputSchema, registerOrganizationInputSchema, restoreProjectInputSchema, updateProjectInputSchema } from "@meetingloop/domain";
 import { getSessionPayload, getSessionSecret, sessionCookieName } from "./session";
 
@@ -12,8 +13,24 @@ function formValue(formData: FormData, key: string): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+const publicErrorCodes = new Set([
+  "EMAIL_ALREADY_EXISTS",
+  "ORGANIZATION_SLUG_ALREADY_EXISTS",
+  "PROJECT_KEY_ALREADY_EXISTS",
+  "PROJECT_MANAGE_FORBIDDEN",
+  "MEETING_CREATE_FORBIDDEN",
+  "MEMBERSHIP_INACTIVE",
+  "PROJECT_NOT_FOUND"
+]);
+
+function actionErrorCode(error: unknown, invalidInputCode: string): string {
+  if (error instanceof ZodError) return invalidInputCode;
+  if (error instanceof Error && publicErrorCodes.has(error.message)) return error.message;
+  return "SYSTEM_ERROR";
+}
+
 export async function loginAction(formData: FormData): Promise<void> {
-  const session = await authenticateDemoUser(formValue(formData, "email"), formValue(formData, "password"));
+  const session = await authenticateUser(formValue(formData, "email"), formValue(formData, "password"));
   if (!session) {
     redirect("/?error=login");
   }
@@ -43,7 +60,7 @@ export async function logoutAction(): Promise<void> {
 
 export async function registerAction(formData: FormData): Promise<void> {
   try {
-    const session = await registerDemoOrganization(registerOrganizationInputSchema.parse({
+    const session = await registerOrganization(registerOrganizationInputSchema.parse({
       email: formValue(formData, "email"),
       password: formValue(formData, "password"),
       displayName: formValue(formData, "displayName"),
@@ -66,7 +83,7 @@ export async function registerAction(formData: FormData): Promise<void> {
       maxAge: 60 * 60 * 8
     });
   } catch (error) {
-    const code = error instanceof Error ? error.message : "register";
+    const code = actionErrorCode(error, "REGISTER_INPUT_INVALID");
     redirect(`/?error=${encodeURIComponent(code)}`);
   }
 
@@ -79,17 +96,16 @@ export async function createProjectAction(formData: FormData): Promise<void> {
     redirect("/?error=session");
   }
 
-  const input = createProjectInputSchema.parse({
-    organizationId: payload.organizationId,
-    name: formValue(formData, "name"),
-    key: formValue(formData, "key").toUpperCase(),
-    description: formValue(formData, "description")
-  });
-
   try {
-    await createDemoProject(payload.userId, payload.role, input);
+    const input = createProjectInputSchema.parse({
+      organizationId: payload.organizationId,
+      name: formValue(formData, "name"),
+      key: formValue(formData, "key").toUpperCase(),
+      description: formValue(formData, "description")
+    });
+    await createProject(payload.userId, input);
   } catch (error) {
-    const code = error instanceof Error ? error.message : "project";
+    const code = actionErrorCode(error, "PROJECT_INPUT_INVALID");
     redirect(`/?error=${encodeURIComponent(code)}`);
   }
 
@@ -102,17 +118,16 @@ export async function updateProjectAction(formData: FormData): Promise<void> {
     redirect("/?error=session");
   }
 
-  const input = updateProjectInputSchema.parse({
-    organizationId: payload.organizationId,
-    projectId: formValue(formData, "projectId"),
-    name: formValue(formData, "name"),
-    description: formValue(formData, "description")
-  });
-
   try {
-    await updateDemoProject(payload.userId, payload.role, input);
+    const input = updateProjectInputSchema.parse({
+      organizationId: payload.organizationId,
+      projectId: formValue(formData, "projectId"),
+      name: formValue(formData, "name"),
+      description: formValue(formData, "description")
+    });
+    await updateProject(payload.userId, input);
   } catch (error) {
-    const code = error instanceof Error ? error.message : "project";
+    const code = actionErrorCode(error, "PROJECT_INPUT_INVALID");
     redirect(`/?error=${encodeURIComponent(code)}`);
   }
 
@@ -125,15 +140,14 @@ export async function archiveProjectAction(formData: FormData): Promise<void> {
     redirect("/?error=session");
   }
 
-  const input = archiveProjectInputSchema.parse({
-    organizationId: payload.organizationId,
-    projectId: formValue(formData, "projectId")
-  });
-
   try {
-    await archiveDemoProject(payload.userId, payload.role, input);
+    const input = archiveProjectInputSchema.parse({
+      organizationId: payload.organizationId,
+      projectId: formValue(formData, "projectId")
+    });
+    await archiveProject(payload.userId, input);
   } catch (error) {
-    const code = error instanceof Error ? error.message : "project";
+    const code = actionErrorCode(error, "PROJECT_INPUT_INVALID");
     redirect(`/?error=${encodeURIComponent(code)}`);
   }
 
@@ -146,15 +160,14 @@ export async function restoreProjectAction(formData: FormData): Promise<void> {
     redirect("/?error=session");
   }
 
-  const input = restoreProjectInputSchema.parse({
-    organizationId: payload.organizationId,
-    projectId: formValue(formData, "projectId")
-  });
-
   try {
-    await restoreDemoProject(payload.userId, payload.role, input);
+    const input = restoreProjectInputSchema.parse({
+      organizationId: payload.organizationId,
+      projectId: formValue(formData, "projectId")
+    });
+    await restoreProject(payload.userId, input);
   } catch (error) {
-    const code = error instanceof Error ? error.message : "project";
+    const code = actionErrorCode(error, "PROJECT_INPUT_INVALID");
     redirect(`/?error=${encodeURIComponent(code)}`);
   }
 
@@ -180,23 +193,22 @@ export async function createMeetingAction(formData: FormData): Promise<void> {
     return { title, summary };
   });
 
-  const input = createMeetingInputSchema.parse({
-    organizationId: payload.organizationId,
-    projectId: formValue(formData, "projectId"),
-    title: formValue(formData, "title"),
-    meetingType: formValue(formData, "meetingType"),
-    participants,
-    agendas,
-    consentConfirmed: formData.get("consentConfirmed") === "on",
-    fixtureFileName: formValue(formData, "fixtureFileName"),
-    fixtureMimeType: "audio/wav",
-    fixtureSizeBytes: 4096
-  });
-
   try {
-    await createDemoMeeting(payload.userId, payload.role, input);
+    const input = createMeetingInputSchema.parse({
+      organizationId: payload.organizationId,
+      projectId: formValue(formData, "projectId"),
+      title: formValue(formData, "title"),
+      meetingType: formValue(formData, "meetingType"),
+      participants,
+      agendas,
+      consentConfirmed: formData.get("consentConfirmed") === "on",
+      fixtureFileName: formValue(formData, "fixtureFileName"),
+      fixtureMimeType: "audio/wav",
+      fixtureSizeBytes: 4096
+    });
+    await createMeeting(payload.userId, input);
   } catch (error) {
-    const code = error instanceof Error ? error.message : "meeting";
+    const code = actionErrorCode(error, "MEETING_INPUT_INVALID");
     redirect(`/?error=${encodeURIComponent(code)}`);
   }
 

@@ -10,6 +10,7 @@ import {
   createProjectInputSchema,
   meetingSchema,
   registerOrganizationInputSchema,
+  saveTranscriptInputSchema,
   transcriptSegmentInputSchema
 } from "./index";
 
@@ -114,5 +115,34 @@ describe("domain model guards", () => {
     expect(transcriptSegmentInputSchema.parse(confirmed).editedText).toContain("최종 전사");
     expect(() => transcriptSegmentInputSchema.parse({ ...confirmed, status: "DRAFT" })).toThrow();
     expect(() => transcriptSegmentInputSchema.parse({ ...confirmed, rawText: "수정 전 임시 전사" })).toThrow();
+  });
+
+  it("validates versioned final transcript input and rejects invalid segments", () => {
+    const input = {
+      organizationId: "org-1",
+      meetingId: "meeting-1",
+      version: 0,
+      segments: [{
+        sequence: 0,
+        speakerLabel: "화자 A",
+        startMs: 0,
+        endMs: 1000,
+        editedText: "최종 전사",
+        source: "MANUAL" as const
+      }]
+    };
+    expect(saveTranscriptInputSchema.parse(input).version).toBe(0);
+    expect(() => saveTranscriptInputSchema.parse({
+      ...input,
+      segments: [{ ...input.segments[0], startMs: 2000, endMs: 1000 }]
+    })).toThrow("TRANSCRIPT_SEGMENT_TIME_INVALID");
+    expect(() => saveTranscriptInputSchema.parse({
+      ...input,
+      segments: [input.segments[0], { ...input.segments[0], editedText: "중복 순서" }]
+    })).toThrow("TRANSCRIPT_SEQUENCE_DUPLICATED");
+    expect(() => saveTranscriptInputSchema.parse({
+      ...input,
+      segments: [{ ...input.segments[0], editedText: "가".repeat(4001) }]
+    })).toThrow();
   });
 });

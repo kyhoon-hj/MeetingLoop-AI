@@ -1,8 +1,9 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
-import { confirmDemoMinutes } from "@meetingloop/db";
+import { confirmMinutes } from "@meetingloop/db";
 import { generateMinutesInputSchema } from "@meetingloop/domain";
 import { getSessionPayload } from "../../../session";
+import { databaseErrorResponse } from "../../../api-errors";
 
 const actionItemSchema = z.object({
   id: z.string().min(1),
@@ -37,9 +38,13 @@ export async function POST(request: Request) {
     return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
   }
 
-  const minutes = await confirmDemoMinutes(session.userId, session.role, parsed.data, parsed.data);
-  return NextResponse.json({
-    status: "CONFIRMED",
-    minutes
-  });
+  try {
+    const minutes = await confirmMinutes(session.userId, parsed.data, parsed.data);
+    return NextResponse.json({
+      status: "CONFIRMED",
+      minutes
+    });
+  } catch (error) {
+    return databaseErrorResponse(error) ?? NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
+  }
 }

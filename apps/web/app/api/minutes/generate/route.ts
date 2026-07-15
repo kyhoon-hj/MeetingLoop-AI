@@ -1,10 +1,11 @@
 import { NextResponse } from "next/server";
 import { z } from "zod";
 import { MinutesProviderError } from "@meetingloop/ai";
-import { generateDemoMinutesFromTranscript, saveDemoTranscriptSegments } from "@meetingloop/db";
+import { generateMinutesFromTranscript, saveTranscriptSegments } from "@meetingloop/db";
 import { generateMinutesInputSchema, transcriptSegmentInputSchema } from "@meetingloop/domain";
 import { configuredMinutesProvider } from "../../../ai-config";
 import { getSessionPayload } from "../../../session";
+import { databaseErrorResponse } from "../../../api-errors";
 
 const generateMinutesRequestSchema = generateMinutesInputSchema.extend({
   fallbackSegments: z.array(transcriptSegmentInputSchema).optional(),
@@ -26,7 +27,7 @@ export async function POST(request: Request) {
   }
 
   const configured = configuredMinutesProvider(parsed.data.provider);
-  const generate = () => generateDemoMinutesFromTranscript(session.userId, session.role, parsed.data, async (segments) => configured.provider.generateMinutes({
+  const generate = () => generateMinutesFromTranscript(session.userId, parsed.data, async (segments) => configured.provider.generateMinutes({
     meetingId: parsed.data.meetingId,
     transcript: segments.map((segment) => ({
       sequence: segment.sequence,
@@ -47,7 +48,7 @@ export async function POST(request: Request) {
         return NextResponse.json({ error: "TRANSCRIPT_REQUIRED" }, { status: 409 });
       }
 
-      await saveDemoTranscriptSegments(session.userId, session.role, {
+      await saveTranscriptSegments(session.userId, {
         organizationId: session.organizationId,
         meetingId: parsed.data.meetingId,
         segments: parsed.data.fallbackSegments
@@ -65,6 +66,6 @@ export async function POST(request: Request) {
       const status = error.code === "AI_RATE_LIMITED" ? 429 : error.code === "AI_RESPONSE_INVALID" ? 502 : 503;
       return NextResponse.json({ error: error.code, message: error.message }, { status });
     }
-    throw error;
+    return databaseErrorResponse(error) ?? NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

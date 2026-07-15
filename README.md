@@ -11,7 +11,7 @@ pnpm install
 docker compose -f infra/docker-compose.yml up -d
 pnpm db:migrate
 pnpm db:seed
-pnpm dev
+pnpm dev:3101
 ```
 
 ### 로컬 PostgreSQL
@@ -55,7 +55,7 @@ pnpm build
 
 ## EC2 Docker 데모 배포
 
-현재 Docker 구성은 애플리케이션 데이터를 프로세스 메모리에 저장하는 데모 배포입니다. 컨테이너를 재시작하거나 새 이미지로 교체하면 가입 사용자, 프로젝트, 회의 데이터가 초기화됩니다.
+사용자, 조직, 프로젝트와 회의 기본 데이터는 PostgreSQL에 저장되므로 웹 프로세스나 컨테이너를 재시작해도 유지됩니다. PostgreSQL 볼륨을 제거하면 데이터가 삭제되므로 운영에서는 별도 백업 정책이 필요합니다.
 
 EC2에 Docker Engine과 Compose 플러그인을 설치한 뒤 저장소 루트에서 실행합니다.
 
