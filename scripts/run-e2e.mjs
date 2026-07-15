@@ -1,5 +1,11 @@
 import { spawn } from "node:child_process";
 
+try {
+  process.loadEnvFile(".env");
+} catch (error) {
+  if (!(error instanceof Error && "code" in error && error.code === "ENOENT")) throw error;
+}
+
 const host = "127.0.0.1";
 const port = "3210";
 const baseUrl = `http://${host}:${port}`;

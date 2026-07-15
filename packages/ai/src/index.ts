@@ -69,6 +69,7 @@ export type MinutesProviderErrorCode =
   | "AI_PROVIDER_UNAVAILABLE"
   | "AI_MODEL_NOT_FOUND"
   | "AI_RATE_LIMITED"
+  | "AI_TIMEOUT"
   | "AI_RESPONSE_INVALID";
 
 export class MinutesProviderError extends Error {
@@ -170,6 +171,10 @@ async function fetchWithTimeout(
   } finally {
     clearTimeout(timeoutId);
   }
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
 }
 
 export class MockSpeechToTextProvider implements SpeechToTextProvider {
@@ -305,7 +310,10 @@ export class OllamaMinutesProvider implements MinutesProvider {
           options: { temperature: 0.1 }
         })
       }, this.timeoutMs);
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new MinutesProviderError("AI_TIMEOUT", "로컬 AI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
+      }
       throw new MinutesProviderError(
         "AI_PROVIDER_UNAVAILABLE",
         "로컬 AI에 연결하지 못했습니다. Ollama가 실행 중인지 확인해 주세요."
@@ -385,7 +393,10 @@ export class GeminiMinutesProvider implements MinutesProvider {
         },
         this.timeoutMs
       );
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new MinutesProviderError("AI_TIMEOUT", "Gemini 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
+      }
       throw new MinutesProviderError("AI_PROVIDER_UNAVAILABLE", "Gemini에 연결하지 못했습니다. 네트워크 상태를 확인해 주세요.");
     }
 

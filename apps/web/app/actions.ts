@@ -13,6 +13,10 @@ function formValue(formData: FormData, key: string): string {
   return typeof value === "string" ? value.trim() : "";
 }
 
+function formValues(formData: FormData, key: string): string[] {
+  return formData.getAll(key).flatMap((value) => typeof value === "string" ? [value.trim()] : []);
+}
+
 const publicErrorCodes = new Set([
   "EMAIL_ALREADY_EXISTS",
   "ORGANIZATION_SLUG_ALREADY_EXISTS",
@@ -184,15 +188,31 @@ export async function createMeetingAction(formData: FormData): Promise<void> {
     redirect("/?error=session");
   }
 
-  const participants = lines(formValue(formData, "participants")).map((line) => {
-    const [displayName = "", roleLabel = "", organizationLabel = ""] = line.split("/").map((part) => part.trim());
-    return { displayName, roleLabel, organizationLabel };
-  });
-  const agendas = lines(formValue(formData, "agendas")).map((line) => {
-    const [title = "", summary = ""] = line.split(":").map((part) => part.trim());
-    return { title, summary };
-  });
+  const participantNames = formValues(formData, "participantName");
+  const participantRoles = formValues(formData, "participantRole");
+  const participantOrganizations = formValues(formData, "participantOrganization");
+  const participants = participantNames.length > 0
+    ? participantNames.map((displayName, index) => ({
+      displayName,
+      roleLabel: participantRoles[index] ?? "",
+      organizationLabel: participantOrganizations[index] ?? ""
+    })).filter((participant) => participant.displayName)
+    : lines(formValue(formData, "participants")).map((line) => {
+      const [displayName = "", roleLabel = "", organizationLabel = ""] = line.split("/").map((part) => part.trim());
+      return { displayName, roleLabel, organizationLabel };
+    });
+  const agendaTitles = formValues(formData, "agendaTitle");
+  const agendaSummaries = formValues(formData, "agendaSummary");
+  const agendas = agendaTitles.length > 0
+    ? agendaTitles.map((title, index) => ({ title, summary: agendaSummaries[index] ?? "" })).filter((agenda) => agenda.title)
+    : lines(formValue(formData, "agendas")).map((line) => {
+      const separator = line.indexOf(":");
+      return separator < 0
+        ? { title: line, summary: "" }
+        : { title: line.slice(0, separator).trim(), summary: line.slice(separator + 1).trim() };
+    });
 
+  let meetingId = "";
   try {
     const input = createMeetingInputSchema.parse({
       organizationId: payload.organizationId,
@@ -202,15 +222,16 @@ export async function createMeetingAction(formData: FormData): Promise<void> {
       participants,
       agendas,
       consentConfirmed: formData.get("consentConfirmed") === "on",
-      fixtureFileName: formValue(formData, "fixtureFileName"),
+      fixtureFileName: formValue(formData, "fixtureFileName") || "local-browser-recording.wav",
       fixtureMimeType: "audio/wav",
       fixtureSizeBytes: 4096
     });
-    await createMeeting(payload.userId, input);
+    const created = await createMeeting(payload.userId, input);
+    meetingId = created.meeting.id;
   } catch (error) {
     const code = actionErrorCode(error, "MEETING_INPUT_INVALID");
-    redirect(`/?error=${encodeURIComponent(code)}`);
+    redirect(`/meetings/new?error=${encodeURIComponent(code)}`);
   }
 
-  redirect("/");
+  redirect(`/?meetingId=${encodeURIComponent(meetingId)}&created=1`);
 }

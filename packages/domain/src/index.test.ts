@@ -10,6 +10,7 @@ import {
   createProjectInputSchema,
   meetingSchema,
   registerOrganizationInputSchema,
+  saveMinutesInputSchema,
   saveTranscriptInputSchema,
   transcriptSegmentInputSchema
 } from "./index";
@@ -144,5 +145,16 @@ describe("domain model guards", () => {
       ...input,
       segments: [{ ...input.segments[0], editedText: "가".repeat(4001) }]
     })).toThrow();
+  });
+
+  it("validates versioned confirmed minutes content", () => {
+    const input = {
+      organizationId: "org-1", meetingId: "meeting-1", version: 0,
+      title: "회의록", summary: "확정 전사 기반 요약", keyPoints: ["핵심 내용"],
+      discussionTopics: [], decisions: [], actionItems: [], risks: [], openQuestions: []
+    };
+    expect(saveMinutesInputSchema.parse(input).version).toBe(0);
+    expect(() => saveMinutesInputSchema.parse({ ...input, title: "" })).toThrow();
+    expect(() => saveMinutesInputSchema.parse({ ...input, keyPoints: [] })).toThrow();
   });
 });

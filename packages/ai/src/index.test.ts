@@ -96,4 +96,19 @@ describe("real minutes providers", () => {
       code: "AI_CONFIGURATION_REQUIRED"
     } satisfies Partial<MinutesProviderError>);
   });
+
+  it("returns a specific timeout error when an AI provider does not respond", async () => {
+    const request = ((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    })) as typeof fetch;
+    const provider = new OllamaMinutesProvider({ request, timeoutMs: 5 });
+
+    await expect(provider.generateMinutes({ meetingId: "meeting-1", transcript })).rejects.toMatchObject({
+      code: "AI_TIMEOUT"
+    } satisfies Partial<MinutesProviderError>);
+  });
 });

@@ -1,5 +1,6 @@
 import { ensureQuickCaptureMeeting, getWorkspace } from "@meetingloop/db";
-import { loginAction, logoutAction, registerAction } from "./actions";
+import { loginAction, registerAction } from "./actions";
+import AppHeader from "./AppHeader";
 import RecordingPanel from "./RecordingPanel";
 import QueryErrorDialog from "./QueryErrorDialog";
 import ValidatedForm from "./ValidatedForm";
@@ -38,7 +39,9 @@ function errorFeedback(error: string | undefined): ErrorFeedback | null {
   };
 }
 
-export default async function HomePage({ searchParams }: { searchParams?: Promise<{ error?: string }> }) {
+export default async function HomePage({ searchParams }: {
+  searchParams?: Promise<{ error?: string; meetingId?: string; view?: string; created?: string }>;
+}) {
   const params = await searchParams;
   const feedback = errorFeedback(params?.error);
   const sessionPayload = await getSessionPayload();
@@ -48,7 +51,10 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
   }
 
   const workspace = sessionPayload ? await getWorkspace(sessionPayload.userId, sessionPayload.organizationId) : null;
-  const activeMeeting = workspace?.meetings.at(-1);
+  const requestedMeeting = params?.meetingId
+    ? workspace?.meetings.find((item) => item.meeting.id === params.meetingId)
+    : null;
+  const activeMeeting = requestedMeeting ?? workspace?.meetings.at(-1);
 
   if (!workspace) {
     return (
@@ -113,15 +119,7 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
   return (
     <main className="shell">
       <QueryErrorDialog feedback={feedback} />
-      <header className="topbar">
-        <div className="brand">
-          <strong>MeetingLoop AI</strong>
-          <span>{workspace.user.displayName}</span>
-        </div>
-        <form action={logoutAction}>
-          <button className="button secondary" type="submit">로그아웃</button>
-        </form>
-      </header>
+      <AppHeader displayName={workspace.user.displayName} />
 
       <section className="panel primary-panel full-workbench" aria-label="녹음 회의록 작업대">
         <div className="panel-header">
@@ -132,13 +130,19 @@ export default async function HomePage({ searchParams }: { searchParams?: Promis
           </div>
         </div>
         <div className="panel-body">
+          {params?.created === "1" && activeMeeting ? (
+            <div className="success-banner" role="status">
+              <strong>새 회의를 만들었습니다.</strong>
+              <span>이제 녹음을 시작하거나 전사 내용을 작성해 주세요.</span>
+            </div>
+          ) : null}
           {activeMeeting ? (
             <div className="current-meeting" role="region" aria-label="현재 기록">
               <strong>{activeMeeting.meeting.title}</strong>
               <span>전사 {activeMeeting.transcriptSegmentCount}개 · 최종 기록 {activeMeeting.minutes?.status === "CONFIRMED" ? "저장됨" : "대기"}</span>
             </div>
           ) : null}
-          <RecordingPanel meetingId={activeMeeting?.meeting.id} />
+          <RecordingPanel meetingId={activeMeeting?.meeting.id} initialView={params?.view === "minutes" ? "minutes" : "transcript"} />
         </div>
       </section>
     </main>

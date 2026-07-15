@@ -57,6 +57,8 @@ interface LiveTranscriptSegment {
 }
 
 interface MinutesDraft {
+  version: number;
+  updatedAt: string;
   title: string;
   summary: string;
   keyPoints: string[];
@@ -75,6 +77,7 @@ interface MinutesDraft {
 
 interface RecordingPanelProps {
   meetingId?: string | undefined;
+  initialView?: WorkspaceView | undefined;
 }
 
 interface AiProviderState {
@@ -134,7 +137,14 @@ function apiFailureMessage(payload: ApiErrorPayload | null, fallback: string): s
     INVALID_TRANSCRIPT_INPUT: "전사 문장의 화자, 시간 또는 내용을 확인해 주세요.",
     MINUTES_EDIT_FORBIDDEN: "회의록을 생성하거나 수정할 권한이 없습니다.",
     MINUTES_CONFIRM_FORBIDDEN: "회의록을 최종 확정할 권한이 없습니다.",
+    MINUTES_NOT_FOUND: "서버에 저장된 최종 회의록이 없습니다.",
+    MINUTES_VERSION_CONFLICT: "다른 사용자가 먼저 회의록을 수정했습니다. 저장본을 다시 불러온 뒤 수정 내용을 다시 반영해 주세요.",
     MEETING_NOT_FOUND: "회의 정보를 찾을 수 없습니다. 화면을 새로고침해 주세요.",
+    AI_CONFIGURATION_REQUIRED: "AI 설정이 필요합니다. API 키 또는 로컬 AI 설정을 확인해 주세요.",
+    AI_PROVIDER_UNAVAILABLE: "AI 제공자에 연결할 수 없습니다. 연결 상태와 설정을 확인해 주세요.",
+    AI_MODEL_NOT_FOUND: "설정한 AI 모델을 찾을 수 없습니다. 모델 이름이나 설치 상태를 확인해 주세요.",
+    AI_GENERATION_IN_PROGRESS: "이 회의의 AI 보고서를 이미 생성하고 있습니다. 완료될 때까지 기다려 주세요.",
+    AI_TIMEOUT: "AI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
     AI_RATE_LIMITED: "AI 요청이 많습니다. 잠시 후 다시 시도해 주세요.",
     AI_RESPONSE_INVALID: "AI 응답 형식이 올바르지 않습니다. 다시 생성해 주세요."
   };
@@ -284,7 +294,7 @@ async function deleteLocalChunks(): Promise<void> {
   db.close();
 }
 
-export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
+export default function RecordingPanel({ meetingId, initialView = "transcript" }: RecordingPanelProps) {
   const [state, setState] = useState<RecordingState>("idle");
   const [elapsedSeconds, setElapsedSeconds] = useState(0);
   const [level, setLevel] = useState(0);
@@ -298,11 +308,15 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const [minutesDraft, setMinutesDraft] = useState<MinutesDraft | null>(null);
   const [minutesMessage, setMinutesMessage] = useState("전사 TXT를 저장한 뒤 AI 분석 보고서를 만들 수 있습니다.");
   const [analysisMode, setAnalysisMode] = useState<AiAnalysisMode>("ollama");
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("transcript");
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(initialView);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [aiStatusMessage, setAiStatusMessage] = useState("AI 연결 상태를 확인하고 있습니다.");
   const [isGeneratingMinutes, setIsGeneratingMinutes] = useState(false);
   const [isFinalizingMinutes, setIsFinalizingMinutes] = useState(false);
+  const [minutesSavedVersion, setMinutesSavedVersion] = useState<number | null>(null);
+  const [minutesUpdatedAt, setMinutesUpdatedAt] = useState<string | null>(null);
+  const [isLoadingMinutes, setIsLoadingMinutes] = useState(false);
+  const [confirmMinutesReload, setConfirmMinutesReload] = useState(false);
   const [finalRecordMessage, setFinalRecordMessage] = useState("AI 회의록을 수정한 뒤 최종 확정할 수 있습니다.");
   const [recordingFileUrl, setRecordingFileUrl] = useState<string | null>(null);
   const [recordingFileName, setRecordingFileName] = useState("meeting-recording.webm");
@@ -323,6 +337,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const minutesPaneRef = useRef<HTMLElement | null>(null);
   const transcriptLoadRequestIdRef = useRef(0);
   const transcriptUserEditedRef = useRef(false);
+  const minutesLoadRequestIdRef = useRef(0);
+  const minutesUserEditedRef = useRef(false);
 
   const showFeedback = useCallback((title: string, detail: string, tone: FeedbackState["tone"] = "error") => {
     setFeedback({ title, message: detail, tone });
@@ -350,12 +366,13 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     setIsLoadingTranscript(true);
     try {
       const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`, { cache: "no-store" });
-      const payload = await response.json().catch(() => null) as ({ transcript?: ServerTranscript } & ApiErrorPayload) | null;
+      const payload = await response.json().catch(() => null) as ({ transcript?: ServerTranscript | null } & ApiErrorPayload) | null;
       if (requestId !== transcriptLoadRequestIdRef.current) return;
-      if (response.status === 404 && payload?.error === "TRANSCRIPT_NOT_FOUND") {
+      if (response.ok && payload?.transcript === null) {
         setTranscriptVersion(null);
         setTranscriptUpdatedAt(null);
-        if (notify) showFeedback("서버 저장본이 없습니다", apiFailureMessage(payload, "저장된 최종 전사가 없습니다."), "info");
+        setTranscriptMessage("아직 서버에 저장된 최종 전사가 없습니다. 전사를 작성한 뒤 최종 확정해 주세요.");
+        if (notify) showFeedback("서버 저장본이 없습니다", "아직 저장된 최종 전사가 없습니다. 전사를 작성한 뒤 최종 확정해 주세요.", "info");
         return;
       }
       if (!response.ok || !payload?.transcript) {
@@ -381,6 +398,49 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   useEffect(() => {
     void loadServerTranscript(false);
   }, [loadServerTranscript]);
+
+  const loadServerMinutes = useCallback(async (notify: boolean) => {
+    if (!meetingId) return;
+    const requestId = minutesLoadRequestIdRef.current + 1;
+    minutesLoadRequestIdRef.current = requestId;
+    setIsLoadingMinutes(true);
+    try {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/minutes`, { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as ({ minutes?: MinutesDraft | null } & ApiErrorPayload) | null;
+      if (requestId !== minutesLoadRequestIdRef.current) return;
+      if (response.ok && payload?.minutes === null) {
+        setMinutesSavedVersion(null);
+        setMinutesUpdatedAt(null);
+        setFinalRecordMessage("아직 서버에 저장된 최종 회의록이 없습니다. 최종 전사를 확정한 뒤 AI 회의록을 생성해 주세요.");
+        if (notify) showFeedback("서버 저장본이 없습니다", "저장된 최종 회의록이 없습니다. AI 보고서를 생성한 뒤 확정해 주세요.", "info");
+        return;
+      }
+      if (!response.ok || !payload?.minutes) {
+        const detail = apiFailureMessage(payload, "서버의 최종 회의록을 불러오지 못했습니다.");
+        setFinalRecordMessage(detail);
+        showFeedback("회의록을 불러오지 못했습니다", detail);
+        return;
+      }
+      if (!notify && minutesUserEditedRef.current) return;
+      setMinutesDraft(payload.minutes);
+      setMinutesSavedVersion(payload.minutes.version);
+      setMinutesUpdatedAt(payload.minutes.updatedAt);
+      minutesUserEditedRef.current = false;
+      setFinalRecordMessage(`서버에 저장된 최종 회의록 v${payload.minutes.version}을 불러왔습니다.`);
+      if (notify) showFeedback("회의록 저장본을 불러왔습니다", `최종 회의록 v${payload.minutes.version}을 화면에 반영했습니다.`, "info");
+    } catch {
+      if (requestId !== minutesLoadRequestIdRef.current) return;
+      const detail = "서버에 연결할 수 없습니다. 네트워크와 서버 실행 상태를 확인해 주세요.";
+      setFinalRecordMessage(detail);
+      showFeedback("서버 연결 오류", detail);
+    } finally {
+      if (requestId === minutesLoadRequestIdRef.current) setIsLoadingMinutes(false);
+    }
+  }, [meetingId, showFeedback]);
+
+  useEffect(() => {
+    void loadServerMinutes(false);
+  }, [loadServerMinutes]);
 
   useEffect(() => {
     if (state !== "recording") {
@@ -777,7 +837,9 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       }
       const payload = await response.json() as { transcript: ServerTranscript };
       applyServerTranscript(payload.transcript);
-      setTranscriptMessage(`최종 전사 ${segmentsToSave.length}개 문장을 v${payload.transcript.version}으로 서버에 확정 저장했습니다.`);
+      const detail = `최종 전사 ${segmentsToSave.length}개 문장을 v${payload.transcript.version}으로 서버에 확정 저장했습니다.`;
+      setTranscriptMessage(detail);
+      showFeedback("최종 전사 저장 완료", detail, "info");
     } catch {
       const detail = "서버에 연결할 수 없습니다. 네트워크와 서버 실행 상태를 확인해 주세요.";
       setTranscriptMessage(detail);
@@ -830,41 +892,18 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       ? "로컬 AI가 저장된 전사 TXT를 분석하고 있습니다."
       : "Gemini가 저장된 전사 TXT를 분석하고 있습니다.");
     try {
-      const response = await fetch("/api/minutes/generate", {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/minutes/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          meetingId,
-          provider: analysisMode,
-          fallbackSegments: liveTranscript
-            .filter((segment) => segment.id !== "intro" && segment.text.trim().length > 0)
-            .map((segment, sequence) => {
-              const startMs = timecodeToMs(segment.timecode);
-              return {
-                clientId: segment.id,
-                sequence,
-                speakerLabel: segment.speaker,
-                startMs,
-                endMs: startMs + 5000,
-                editedText: segment.text.trim(),
-                source: segment.rawText === "새 전사 문장을 입력하세요." ? "MANUAL" : "LIVE",
-                status: "CONFIRMED"
-              };
-            })
-        })
+        body: JSON.stringify({ provider: analysisMode })
       });
 
-      if (response.status === 409) {
-        const detail = "확정된 전사 TXT가 필요합니다. 최종 전사 확정을 먼저 눌러 주세요.";
-        setMinutesMessage(detail);
-        showFeedback("최종 전사가 필요합니다", detail, "warning");
-        return;
-      }
       if (!response.ok) {
         const errorPayload = await response.json().catch(() => null) as ApiErrorPayload | null;
         const detail = apiFailureMessage(errorPayload, "AI 분석 보고서 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.");
         setMinutesMessage(detail);
-        showFeedback("AI 보고서를 생성하지 못했습니다", detail);
+        showFeedback(errorPayload?.error === "TRANSCRIPT_REQUIRED" ? "최종 전사가 필요합니다" : "AI 보고서를 생성하지 못했습니다", detail,
+          response.status === 409 ? "warning" : "error");
         return;
       }
 
@@ -872,7 +911,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         minutes: MinutesDraft;
         provider: { kind: "mock" | AiAnalysisMode; model: string };
       };
-      setMinutesDraft(payload.minutes);
+      minutesUserEditedRef.current = true;
+      setMinutesDraft({ ...payload.minutes, version: minutesSavedVersion ?? 0 });
       setWorkspaceView("minutes");
       window.requestAnimationFrame(() => {
         if (document.activeElement instanceof HTMLElement) {
@@ -911,7 +951,16 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   }
 
   function updateMinutesDraft<K extends keyof MinutesDraft>(key: K, value: MinutesDraft[K]) {
+    minutesUserEditedRef.current = true;
     setMinutesDraft((draft) => draft ? { ...draft, [key]: value } : draft);
+  }
+
+  function requestMinutesReload() {
+    if (minutesUserEditedRef.current) {
+      setConfirmMinutesReload(true);
+      return;
+    }
+    void loadServerMinutes(true);
   }
 
   function splitLines(value: string): string[] {
@@ -929,12 +978,12 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     setIsFinalizingMinutes(true);
     setFinalRecordMessage("수정한 회의록을 최종 확정하여 서버에 저장합니다.");
     try {
-      const response = await fetch("/api/minutes/finalize", {
-        method: "POST",
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/minutes`, {
+        method: "PUT",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          meetingId,
-          ...minutesDraft
+          ...minutesDraft,
+          version: minutesSavedVersion ?? 0
         })
       });
 
@@ -942,13 +991,19 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         const errorPayload = await response.json().catch(() => null) as ApiErrorPayload | null;
         const detail = apiFailureMessage(errorPayload, "회의록을 최종 확정하지 못했습니다. 잠시 후 다시 시도해 주세요.");
         setFinalRecordMessage(detail);
-        showFeedback("회의록을 저장하지 못했습니다", detail);
+        showFeedback(response.status === 409 ? "다른 수정 내용이 먼저 저장되었습니다" : "회의록을 저장하지 못했습니다", detail,
+          response.status === 409 ? "warning" : "error");
         return;
       }
 
       const payload = await response.json() as { minutes: MinutesDraft };
       setMinutesDraft(payload.minutes);
-      setFinalRecordMessage("회의록을 최종 확정했습니다. 서버에는 최종 전사 TXT와 확정 회의록만 저장됩니다.");
+      setMinutesSavedVersion(payload.minutes.version);
+      setMinutesUpdatedAt(payload.minutes.updatedAt);
+      minutesUserEditedRef.current = false;
+      const detail = `회의록을 v${payload.minutes.version}으로 최종 확정했습니다. 서버에는 최종 전사 TXT와 확정 회의록만 저장됩니다.`;
+      setFinalRecordMessage(detail);
+      showFeedback("회의록 저장 완료", detail, "info");
     } catch {
       const detail = "서버에 연결할 수 없어 회의록을 저장하지 못했습니다. 서버 상태를 확인해 주세요.";
       setFinalRecordMessage(detail);
@@ -997,6 +1052,19 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         onConfirm={() => {
           setConfirmServerReload(false);
           void loadServerTranscript(true);
+        }}
+      />
+      <FeedbackDialog
+        open={confirmMinutesReload}
+        title="저장된 회의록을 다시 불러올까요?"
+        message="화면에서 생성하거나 수정 중인 회의록은 사라지고 서버에 마지막으로 저장된 최종 회의록으로 바뀝니다."
+        tone="warning"
+        confirmLabel="저장본 불러오기"
+        cancelLabel="취소"
+        onClose={() => setConfirmMinutesReload(false)}
+        onConfirm={() => {
+          setConfirmMinutesReload(false);
+          void loadServerMinutes(true);
         }}
       />
       <section className="recorder-panel" aria-label="브라우저 녹음">
@@ -1083,10 +1151,22 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             <div>
               <strong>회의록 및 AI 보고서</strong>
               <p className="muted">{minutesMessage}</p>
+              <p className="transcript-save-meta">
+                {isLoadingMinutes
+                  ? "회의록 저장본 확인 중"
+                  : minutesSavedVersion !== null && minutesUpdatedAt
+                    ? `서버 v${minutesSavedVersion} · 최종 수정 ${formatUpdatedAt(minutesUpdatedAt)}`
+                    : "서버 저장 전 · AI 생성 초안"}
+              </p>
             </div>
-            <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
-              {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
-            </button>
+            <div className="toolbar">
+              <button className="button secondary" type="button" onClick={requestMinutesReload} disabled={isLoadingMinutes}>
+                저장된 회의록 불러오기
+              </button>
+              <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
+                {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
+              </button>
+            </div>
           </div>
           <div className="ai-provider-bar">
             <div className="segmented-control" role="group" aria-label="AI 분석 방식">

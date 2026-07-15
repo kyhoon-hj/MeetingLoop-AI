@@ -13,6 +13,7 @@ import {
   generateMinutesInputSchema,
   registerOrganizationInputSchema,
   restoreProjectInputSchema,
+  saveMinutesInputSchema,
   saveTranscriptInputSchema,
   saveTranscriptSegmentsInputSchema,
   updateProjectInputSchema,
@@ -23,6 +24,7 @@ import {
   type GenerateMinutesInput,
   type Meeting,
   type MeetingMinutes,
+  type MinutesRevision,
   type Membership,
   type Organization,
   type Participant,
@@ -31,6 +33,7 @@ import {
   type RegisterOrganizationInput,
   type RestoreProjectInput,
   type Role,
+  type SaveMinutesInput,
   type SaveTranscriptInput,
   type SaveTranscriptSegmentsInput,
   type TranscriptDocument,
@@ -124,6 +127,65 @@ export interface MeetingSummary {
   recording: Recording | null;
   transcriptSegmentCount: number;
   minutes: MeetingMinutes | null;
+}
+
+export interface MeetingListItem {
+  id: string;
+  title: string;
+  projectName: string;
+  startedAt: string;
+  status: Meeting["status"];
+  participantNames: string[];
+  transcriptConfirmed: boolean;
+  transcriptVersion: number | null;
+  minutesConfirmed: boolean;
+  minutesVersion: number | null;
+  updatedByName: string;
+  updatedAt: string;
+}
+
+export interface MeetingListPage {
+  items: MeetingListItem[];
+  nextCursor: string | null;
+  totalCount: number;
+}
+
+export interface MeetingListOptions {
+  cursor?: string | undefined;
+  limit?: number | undefined;
+  q?: string | undefined;
+  projectId?: string | undefined;
+  status?: Meeting["status"] | undefined;
+  meetingType?: Meeting["meetingType"] | undefined;
+  transcriptStatus?: "CONFIRMED" | "PENDING" | undefined;
+  minutesStatus?: "CONFIRMED" | "PENDING" | undefined;
+  createdBy?: string | undefined;
+  from?: string | undefined;
+  to?: string | undefined;
+}
+
+export interface MeetingFilterOptions {
+  projects: Array<{ id: string; name: string }>;
+  creators: Array<{ id: string; displayName: string }>;
+}
+
+export interface MeetingRevisionSummary {
+  id: string;
+  contentType: "TRANSCRIPT" | "MINUTES";
+  version: number;
+  changedBy: string;
+  changedByName: string;
+  createdAt: string;
+}
+
+export interface MeetingDetailRecord {
+  meeting: Meeting;
+  projectName: string;
+  participants: Participant[];
+  agendas: Agenda[];
+  transcript: TranscriptDocument | null;
+  minutes: MeetingMinutes | null;
+  revisions: MeetingRevisionSummary[];
 }
 
 type Row = Record<string, unknown>;
@@ -237,7 +299,8 @@ function mapMinutes(row: Row): MeetingMinutes {
     discussionTopics: jsonArray<string>(row.discussion_topics), decisions: jsonArray<string>(row.decisions),
     actionItems: jsonArray<MeetingMinutes["actionItems"][number]>(row.action_items), risks: jsonArray<string>(row.risks),
     openQuestions: jsonArray<string>(row.open_questions), source: "TRANSCRIPT_TEXT", status: "CONFIRMED",
-    createdBy: String(row.created_by), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at)
+    version: numberValue(row.version), createdBy: String(row.created_by), updatedBy: String(row.updated_by),
+    createdAt: iso(row.created_at), updatedAt: iso(row.updated_at)
   };
 }
 
@@ -349,6 +412,7 @@ export async function getWorkspace(userId: string, organizationId: string): Prom
               mm.id AS minutes_id, mm.title AS minutes_title, mm.summary AS minutes_summary,
               mm.key_points, mm.discussion_topics, mm.decisions, mm.action_items, mm.risks, mm.open_questions,
               mm.source AS minutes_source, mm.status AS minutes_status, mm.created_by AS minutes_created_by,
+              mm.version AS minutes_version, mm.updated_by AS minutes_updated_by,
               mm.created_at AS minutes_created_at, mm.updated_at AS minutes_updated_at
        FROM meetings m JOIN projects p ON p.id = m.project_id AND p.organization_id = m.organization_id
        LEFT JOIN LATERAL (SELECT * FROM recordings WHERE meeting_id = m.id ORDER BY created_at DESC LIMIT 1) r ON true
@@ -371,6 +435,7 @@ export async function getWorkspace(userId: string, organizationId: string): Prom
       summary: row.minutes_summary, key_points: row.key_points, discussion_topics: row.discussion_topics,
       decisions: row.decisions, action_items: row.action_items, risks: row.risks, open_questions: row.open_questions,
       source: row.minutes_source, status: row.minutes_status, created_by: row.minutes_created_by,
+      version: row.minutes_version, updated_by: row.minutes_updated_by,
       created_at: row.minutes_created_at, updated_at: row.minutes_updated_at
     });
     return {
@@ -382,6 +447,224 @@ export async function getWorkspace(userId: string, organizationId: string): Prom
   return {
     ...session, projects: projects.filter((project) => project.status === "ACTIVE"),
     archivedProjects: projects.filter((project) => project.status === "ARCHIVED"), meetings
+  };
+}
+
+interface MeetingCursor {
+  startedAt: string;
+  id: string;
+}
+
+function encodeMeetingCursor(cursor: MeetingCursor): string {
+  return Buffer.from(JSON.stringify(cursor), "utf8").toString("base64url");
+}
+
+function decodeMeetingCursor(value: string | undefined): MeetingCursor | null {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(Buffer.from(value, "base64url").toString("utf8")) as Partial<MeetingCursor>;
+    if (typeof parsed.id !== "string" || typeof parsed.startedAt !== "string" || Number.isNaN(Date.parse(parsed.startedAt))) {
+      throw new Error("INVALID_CURSOR");
+    }
+    return { id: parsed.id, startedAt: new Date(parsed.startedAt).toISOString() };
+  } catch {
+    throw new Error("INVALID_CURSOR");
+  }
+}
+
+export async function listMeetings(
+  userId: string,
+  organizationId: string,
+  options: MeetingListOptions = {}
+): Promise<MeetingListPage> {
+  const pool = getDatabasePool();
+  await requireActiveMembership(pool, userId, organizationId);
+  const cursor = decodeMeetingCursor(options.cursor);
+  const limit = Math.min(Math.max(options.limit ?? 20, 1), 50);
+  const q = options.q?.trim() ?? "";
+  if (q.length > 100) throw new Error("INVALID_FILTER");
+  const values: unknown[] = [organizationId];
+  const conditions = ["m.organization_id = $1", "m.status <> 'ARCHIVED'"];
+  const addValue = (value: unknown): string => {
+    values.push(value);
+    return `$${values.length}`;
+  };
+  if (q) {
+    const pattern = `%${q.replace(/[\\%_]/g, "\\$&")}%`;
+    const parameter = addValue(pattern);
+    conditions.push(`(
+      m.title ILIKE ${parameter} ESCAPE '\\'
+      OR EXISTS (SELECT 1 FROM participants search_participant
+                 WHERE search_participant.meeting_id = m.id AND search_participant.display_name ILIKE ${parameter} ESCAPE '\\')
+      OR EXISTS (SELECT 1 FROM transcripts search_transcript
+                 JOIN transcript_segments search_segment ON search_segment.transcript_id = search_transcript.id
+                 WHERE search_transcript.organization_id = m.organization_id AND search_transcript.meeting_id = m.id
+                   AND search_transcript.status = 'CONFIRMED' AND search_segment.status <> 'DELETED'
+                   AND search_segment.edited_text ILIKE ${parameter} ESCAPE '\\')
+      OR (mm.id IS NOT NULL AND concat_ws(' ', mm.title, mm.summary, mm.key_points::text,
+          mm.discussion_topics::text, mm.decisions::text, mm.action_items::text,
+          mm.risks::text, mm.open_questions::text) ILIKE ${parameter} ESCAPE '\\')
+    )`);
+  }
+  if (options.projectId) conditions.push(`m.project_id = ${addValue(options.projectId)}`);
+  if (options.status) conditions.push(`m.status = ${addValue(options.status)}`);
+  if (options.meetingType) conditions.push(`m.meeting_type = ${addValue(options.meetingType)}`);
+  if (options.transcriptStatus === "CONFIRMED") conditions.push("t.id IS NOT NULL");
+  if (options.transcriptStatus === "PENDING") conditions.push("t.id IS NULL");
+  if (options.minutesStatus === "CONFIRMED") conditions.push("mm.id IS NOT NULL");
+  if (options.minutesStatus === "PENDING") conditions.push("mm.id IS NULL");
+  if (options.createdBy) conditions.push(`m.created_by = ${addValue(options.createdBy)}`);
+  if (options.from) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(options.from) || Number.isNaN(Date.parse(`${options.from}T00:00:00Z`))) {
+      throw new Error("INVALID_FILTER");
+    }
+    conditions.push(`m.started_at >= ${addValue(`${options.from}T00:00:00+09:00`)}::timestamptz`);
+  }
+  if (options.to) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(options.to) || Number.isNaN(Date.parse(`${options.to}T00:00:00Z`))) {
+      throw new Error("INVALID_FILTER");
+    }
+    conditions.push(`m.started_at < (${addValue(`${options.to}T00:00:00+09:00`)}::timestamptz + interval '1 day')`);
+  }
+  if (options.from && options.to && options.from > options.to) throw new Error("INVALID_FILTER");
+
+  const fromSql = `
+     FROM meetings m
+     JOIN projects p ON p.id = m.project_id AND p.organization_id = m.organization_id
+     JOIN users creator ON creator.id = m.created_by
+     LEFT JOIN transcripts t ON t.meeting_id = m.id AND t.organization_id = m.organization_id AND t.status = 'CONFIRMED'
+     LEFT JOIN meeting_minutes mm ON mm.meeting_id = m.id AND mm.organization_id = m.organization_id AND mm.status = 'CONFIRMED'`;
+  const baseWhere = conditions.join(" AND ");
+  const countResult = await pool.query(`SELECT count(*)::int AS total_count ${fromSql} WHERE ${baseWhere}`, values);
+
+  const pageConditions = [...conditions];
+  if (cursor) {
+    const startedAtParameter = addValue(cursor.startedAt);
+    const idParameter = addValue(cursor.id);
+    pageConditions.push(`(m.started_at, m.id) < (${startedAtParameter}::timestamptz, ${idParameter}::text)`);
+  }
+  const limitParameter = addValue(limit + 1);
+  const result = await pool.query(
+    `SELECT m.id, m.title, m.started_at, m.status, p.name AS project_name,
+            COALESCE((SELECT jsonb_agg(pa.display_name ORDER BY pa.created_at, pa.id)
+                      FROM participants pa WHERE pa.meeting_id = m.id), '[]'::jsonb) AS participant_names,
+            t.id IS NOT NULL AS transcript_confirmed, t.version AS transcript_version,
+            mm.id IS NOT NULL AS minutes_confirmed, mm.version AS minutes_version,
+            COALESCE(editor.display_name, creator.display_name, '알 수 없음') AS updated_by_name,
+            GREATEST(m.updated_at, t.updated_at, mm.updated_at) AS final_updated_at
+     ${fromSql}
+     LEFT JOIN users editor ON editor.id = COALESCE(mm.updated_by, t.confirmed_by)
+     WHERE ${pageConditions.join(" AND ")}
+     ORDER BY m.started_at DESC, m.id DESC
+     LIMIT ${limitParameter}`,
+    values
+  );
+  const hasNext = result.rows.length > limit;
+  const rows = result.rows.slice(0, limit) as Row[];
+  const items = rows.map((row): MeetingListItem => ({
+    id: String(row.id), title: String(row.title), projectName: String(row.project_name),
+    startedAt: iso(row.started_at), status: String(row.status) as Meeting["status"],
+    participantNames: jsonArray<string>(row.participant_names),
+    transcriptConfirmed: Boolean(row.transcript_confirmed),
+    transcriptVersion: row.transcript_version == null ? null : numberValue(row.transcript_version),
+    minutesConfirmed: Boolean(row.minutes_confirmed),
+    minutesVersion: row.minutes_version == null ? null : numberValue(row.minutes_version),
+    updatedByName: String(row.updated_by_name), updatedAt: iso(row.final_updated_at)
+  }));
+  const last = items.at(-1);
+  return {
+    items,
+    nextCursor: hasNext && last ? encodeMeetingCursor({ id: last.id, startedAt: last.startedAt }) : null,
+    totalCount: numberValue((countResult.rows[0] as Row).total_count)
+  };
+}
+
+export async function getMeetingFilterOptions(
+  userId: string,
+  organizationId: string
+): Promise<MeetingFilterOptions> {
+  const pool = getDatabasePool();
+  await requireActiveMembership(pool, userId, organizationId);
+  const [projects, creators] = await Promise.all([
+    pool.query(
+      `SELECT id, name FROM projects WHERE organization_id = $1 AND status = 'ACTIVE' ORDER BY name, id`,
+      [organizationId]
+    ),
+    pool.query(
+      `SELECT DISTINCT users.id, users.display_name
+       FROM meetings JOIN users ON users.id = meetings.created_by
+       WHERE meetings.organization_id = $1 AND meetings.status <> 'ARCHIVED'
+       ORDER BY users.display_name, users.id`,
+      [organizationId]
+    )
+  ]);
+  return {
+    projects: projects.rows.map((raw) => ({ id: String((raw as Row).id), name: String((raw as Row).name) })),
+    creators: creators.rows.map((raw) => ({ id: String((raw as Row).id), displayName: String((raw as Row).display_name) }))
+  };
+}
+
+export async function getMeetingDetail(
+  userId: string,
+  organizationId: string,
+  meetingId: string
+): Promise<MeetingDetailRecord> {
+  const pool = getDatabasePool();
+  await requireActiveMembership(pool, userId, organizationId);
+  const meetingResult = await pool.query(
+    `SELECT m.*, p.name AS project_name
+     FROM meetings m JOIN projects p ON p.id = m.project_id AND p.organization_id = m.organization_id
+     WHERE m.id = $1 AND m.organization_id = $2 AND m.status <> 'ARCHIVED'`,
+    [meetingId, organizationId]
+  );
+  const meetingRow = meetingResult.rows[0] as Row | undefined;
+  if (!meetingRow) throw new Error("MEETING_NOT_FOUND");
+
+  const [participantsResult, agendasResult, transcript, minutes, revisionsResult] = await Promise.all([
+    pool.query(`SELECT * FROM participants WHERE meeting_id = $1 ORDER BY created_at, id`, [meetingId]),
+    pool.query(`SELECT * FROM agendas WHERE meeting_id = $1 ORDER BY sequence, id`, [meetingId]),
+    getTranscript(userId, organizationId, meetingId).catch((error: unknown) => {
+      if (error instanceof Error && error.message === "TRANSCRIPT_NOT_FOUND") return null;
+      throw error;
+    }),
+    getMinutes(userId, organizationId, meetingId).catch((error: unknown) => {
+      if (error instanceof Error && error.message === "MINUTES_NOT_FOUND") return null;
+      throw error;
+    }),
+    pool.query(
+      `SELECT revision.id, 'TRANSCRIPT' AS content_type, revision.version, revision.changed_by,
+              users.display_name AS changed_by_name, revision.created_at
+       FROM transcript_revisions revision
+       JOIN transcripts transcript ON transcript.id = revision.transcript_id
+       JOIN users ON users.id = revision.changed_by
+       WHERE transcript.organization_id = $1 AND transcript.meeting_id = $2
+       UNION ALL
+       SELECT revision.id, 'MINUTES' AS content_type, revision.version, revision.changed_by,
+              users.display_name AS changed_by_name, revision.created_at
+       FROM meeting_minutes_revisions revision
+       JOIN meeting_minutes minutes ON minutes.id = revision.meeting_minutes_id
+       JOIN users ON users.id = revision.changed_by
+       WHERE minutes.organization_id = $1 AND minutes.meeting_id = $2
+       ORDER BY created_at DESC, version DESC`,
+      [organizationId, meetingId]
+    )
+  ]);
+
+  return {
+    meeting: mapMeeting(meetingRow),
+    projectName: String(meetingRow.project_name),
+    participants: participantsResult.rows.map((row) => mapParticipant(row as Row)),
+    agendas: agendasResult.rows.map((row) => mapAgenda(row as Row)),
+    transcript,
+    minutes,
+    revisions: revisionsResult.rows.map((raw): MeetingRevisionSummary => {
+      const row = raw as Row;
+      return {
+        id: String(row.id), contentType: String(row.content_type) as MeetingRevisionSummary["contentType"],
+        version: numberValue(row.version), changedBy: String(row.changed_by), changedByName: String(row.changed_by_name),
+        createdAt: iso(row.created_at)
+      };
+    })
   };
 }
 
@@ -722,16 +1005,43 @@ export async function generateMinutesFromTranscript(
   const now = new Date().toISOString();
   return {
     id: `draft-${randomUUID()}`, organizationId: parsed.organizationId, meetingId: parsed.meetingId,
-    ...generated, source: "TRANSCRIPT_TEXT", status: "DRAFT", createdBy: userId, createdAt: now, updatedAt: now
+    ...generated, source: "TRANSCRIPT_TEXT", status: "DRAFT", version: 0,
+    createdBy: userId, updatedBy: userId, createdAt: now, updatedAt: now
   };
 }
 
-export async function confirmMinutes(
-  userId: string,
-  input: GenerateMinutesInput,
-  draft: Pick<MeetingMinutes, "title" | "summary" | "keyPoints" | "discussionTopics" | "decisions" | "actionItems" | "risks" | "openQuestions">
+export class MinutesVersionConflictError extends Error {
+  readonly currentVersion: number;
+
+  constructor(currentVersion: number) {
+    super("MINUTES_VERSION_CONFLICT");
+    this.name = "MinutesVersionConflictError";
+    this.currentVersion = currentVersion;
+  }
+}
+
+async function loadMinutesDocument(
+  client: Pool | PoolClient,
+  organizationId: string,
+  meetingId: string
 ): Promise<MeetingMinutes> {
-  const parsed = generateMinutesInputSchema.parse(input);
+  const result = await client.query(
+    `SELECT * FROM meeting_minutes
+     WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
+    [organizationId, meetingId]
+  );
+  if (!result.rows[0]) throw new Error("MINUTES_NOT_FOUND");
+  return mapMinutes(result.rows[0] as Row);
+}
+
+export async function getMinutes(userId: string, organizationId: string, meetingId: string): Promise<MeetingMinutes> {
+  const pool = getDatabasePool();
+  await requireActiveMembership(pool, userId, organizationId);
+  return loadMinutesDocument(pool, organizationId, meetingId);
+}
+
+export async function saveMinutes(userId: string, input: SaveMinutesInput): Promise<MeetingMinutes> {
+  const parsed = saveMinutesInputSchema.parse(input);
   return withTransaction(async (client) => {
     const membership = await requireActiveMembership(client, userId, parsed.organizationId);
     assertMinutesConfirmerRole(membership.role);
@@ -740,20 +1050,96 @@ export async function confirmMinutes(
       [parsed.meetingId, parsed.organizationId]
     );
     if (!meeting.rows[0]) throw new Error("MEETING_NOT_FOUND");
-    const result = await client.query(
-      `INSERT INTO meeting_minutes (id, organization_id, meeting_id, title, summary, key_points, discussion_topics,
-        decisions, action_items, risks, open_questions, source, status, created_by, created_at, updated_at, version, updated_by)
-       VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
-        'TRANSCRIPT_TEXT', 'CONFIRMED', $12, now(), now(), 1, $12)
-       ON CONFLICT (meeting_id) DO UPDATE SET title = EXCLUDED.title, summary = EXCLUDED.summary,
-        key_points = EXCLUDED.key_points, discussion_topics = EXCLUDED.discussion_topics, decisions = EXCLUDED.decisions,
-        action_items = EXCLUDED.action_items, risks = EXCLUDED.risks, open_questions = EXCLUDED.open_questions,
-        status = 'CONFIRMED', version = meeting_minutes.version + 1, updated_by = EXCLUDED.updated_by, updated_at = now()
-       RETURNING *`,
-      [`minutes-${randomUUID()}`, parsed.organizationId, parsed.meetingId, draft.title, draft.summary,
-        JSON.stringify(draft.keyPoints), JSON.stringify(draft.discussionTopics), JSON.stringify(draft.decisions),
-        JSON.stringify(draft.actionItems), JSON.stringify(draft.risks), JSON.stringify(draft.openQuestions), userId]
+    const transcript = await client.query(
+      `SELECT id FROM transcripts WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
+      [parsed.organizationId, parsed.meetingId]
     );
-    return mapMinutes(result.rows[0] as Row);
+    if (!transcript.rows[0]) throw new Error("TRANSCRIPT_REQUIRED");
+
+    const currentResult = await client.query(
+      `SELECT * FROM meeting_minutes WHERE organization_id = $1 AND meeting_id = $2 FOR UPDATE`,
+      [parsed.organizationId, parsed.meetingId]
+    );
+    const current = currentResult.rows[0] as Row | undefined;
+    let minutesId: string;
+    let nextVersion: number;
+
+    if (!current) {
+      if (parsed.version !== 0) throw new MinutesVersionConflictError(0);
+      minutesId = `minutes-${randomUUID()}`;
+      nextVersion = 1;
+      await client.query(
+        `INSERT INTO meeting_minutes (id, organization_id, meeting_id, title, summary, key_points, discussion_topics,
+          decisions, action_items, risks, open_questions, source, status, created_by, created_at, updated_at, version, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, $11::jsonb,
+          'TRANSCRIPT_TEXT', 'CONFIRMED', $12, now(), now(), 1, $12)`,
+        [minutesId, parsed.organizationId, parsed.meetingId, parsed.title, parsed.summary,
+          JSON.stringify(parsed.keyPoints), JSON.stringify(parsed.discussionTopics), JSON.stringify(parsed.decisions),
+          JSON.stringify(parsed.actionItems), JSON.stringify(parsed.risks), JSON.stringify(parsed.openQuestions), userId]
+      );
+    } else {
+      const currentVersion = numberValue(current.version);
+      if (parsed.version !== currentVersion) throw new MinutesVersionConflictError(currentVersion);
+      minutesId = String(current.id);
+      const previous = mapMinutes(current);
+      await client.query(
+        `INSERT INTO meeting_minutes_revisions (id, meeting_minutes_id, version, snapshot, changed_by, created_at)
+         VALUES ($1, $2, $3, $4::jsonb, $5, now())`,
+        [`minutes-revision-${randomUUID()}`, minutesId, currentVersion, JSON.stringify(previous), userId]
+      );
+      nextVersion = currentVersion + 1;
+      await client.query(
+        `UPDATE meeting_minutes SET title = $2, summary = $3, key_points = $4::jsonb,
+          discussion_topics = $5::jsonb, decisions = $6::jsonb, action_items = $7::jsonb,
+          risks = $8::jsonb, open_questions = $9::jsonb, status = 'CONFIRMED', version = $10,
+          updated_by = $11, updated_at = now() WHERE id = $1`,
+        [minutesId, parsed.title, parsed.summary, JSON.stringify(parsed.keyPoints),
+          JSON.stringify(parsed.discussionTopics), JSON.stringify(parsed.decisions), JSON.stringify(parsed.actionItems),
+          JSON.stringify(parsed.risks), JSON.stringify(parsed.openQuestions), nextVersion, userId]
+      );
+    }
+    const saved = await loadMinutesDocument(client, parsed.organizationId, parsed.meetingId);
+    if (saved.version !== nextVersion) throw new Error("MINUTES_SAVE_FAILED");
+    return saved;
   });
+}
+
+export async function getMinutesRevisions(
+  userId: string,
+  organizationId: string,
+  meetingId: string
+): Promise<MinutesRevision[]> {
+  const pool = getDatabasePool();
+  await requireActiveMembership(pool, userId, organizationId);
+  const minutes = await pool.query(
+    `SELECT id FROM meeting_minutes WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
+    [organizationId, meetingId]
+  );
+  if (!minutes.rows[0]) throw new Error("MINUTES_NOT_FOUND");
+  const result = await pool.query(
+    `SELECT * FROM meeting_minutes_revisions WHERE meeting_minutes_id = $1 ORDER BY version DESC`,
+    [(minutes.rows[0] as Row).id]
+  );
+  return result.rows.map((raw) => {
+    const row = raw as Row;
+    return {
+      id: String(row.id), meetingMinutesId: String(row.meeting_minutes_id), version: numberValue(row.version),
+      snapshot: row.snapshot as Record<string, unknown>, changedBy: String(row.changed_by), createdAt: iso(row.created_at)
+    };
+  });
+}
+
+export async function confirmMinutes(
+  userId: string,
+  input: GenerateMinutesInput,
+  draft: Pick<MeetingMinutes, "title" | "summary" | "keyPoints" | "discussionTopics" | "decisions" | "actionItems" | "risks" | "openQuestions">
+): Promise<MeetingMinutes> {
+  const parsed = generateMinutesInputSchema.parse(input);
+  let version = 0;
+  try {
+    version = (await getMinutes(userId, parsed.organizationId, parsed.meetingId)).version;
+  } catch (error) {
+    if (!(error instanceof Error && error.message === "MINUTES_NOT_FOUND")) throw error;
+  }
+  return saveMinutes(userId, { ...parsed, ...draft, version });
 }

@@ -16,8 +16,11 @@ export function databaseErrorResponse(error: unknown): NextResponse | null {
   if (forbiddenErrors.has(code)) {
     return NextResponse.json({ error: code }, { status: 403 });
   }
-  if (code === "MEETING_NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TRANSCRIPT_NOT_FOUND") {
+  if (code === "MEETING_NOT_FOUND" || code === "PROJECT_NOT_FOUND" || code === "TRANSCRIPT_NOT_FOUND" || code === "MINUTES_NOT_FOUND") {
     return NextResponse.json({ error: code }, { status: 404 });
+  }
+  if (code === "TRANSCRIPT_REQUIRED") {
+    return NextResponse.json({ error: code }, { status: 409 });
   }
   return null;
 }

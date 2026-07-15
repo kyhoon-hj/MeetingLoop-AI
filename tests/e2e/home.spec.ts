@@ -87,6 +87,10 @@ test("records transcript text and finalizes an AI report in the simplified workb
   await page.getByRole("textbox", { name: "전사 문장 1" }).fill("회의 녹음 후 전사 TXT만 서버에 저장하고 최종 회의록 기록을 남긴다.");
   await page.getByRole("button", { name: "최종 전사 확정" }).click();
   await expect(transcriptEditor).toContainText(/최종 전사 1개 문장을 v\d+으로 서버에 확정 저장했습니다./);
+  const saveCompleteDialog = page.getByRole("alertdialog");
+  await expect(saveCompleteDialog).toContainText("최종 전사 저장 완료");
+  await expect(saveCompleteDialog).toContainText(/최종 전사 1개 문장을 v\d+으로 서버에 확정 저장했습니다./);
+  await saveCompleteDialog.getByRole("button", { name: "확인" }).click();
   await expect(page.getByRole("button", { name: "TXT 다운로드" })).toBeEnabled();
   const downloadPromise = page.waitForEvent("download");
   await page.getByRole("button", { name: "TXT 다운로드" }).click();
@@ -94,19 +98,21 @@ test("records transcript text and finalizes an AI report in the simplified workb
   expect(download.suggestedFilename()).toMatch(/transcript-v\d+\.txt$/);
 
   const reportTab = page.getByRole("tab", { name: "회의록·보고서" });
-  if (await reportTab.isVisible()) {
-    await reportTab.click();
-  }
+  const report = page.getByRole("region", { name: "AI 분석 보고서" });
+  if (!(await report.isVisible())) await reportTab.click();
   await expect(page.getByRole("group", { name: "AI 분석 방식" })).toBeVisible();
   await expect(page.getByRole("button", { name: "로컬 무료 AI" })).toHaveAttribute("aria-pressed", "true");
   await page.getByRole("button", { name: "AI 보고서 생성" }).click();
-  const report = page.getByRole("region", { name: "AI 분석 보고서" });
   await expect(report).toContainText("테스트 분석기 (deterministic-test)가 전사 TXT를 분석해 보고서를 생성했습니다.");
   await expect(report.getByRole("textbox", { name: "요약", exact: true })).toHaveValue(/회의 녹음 후 전사 TXT만 서버에 저장/);
   await report.getByRole("textbox", { name: "제목", exact: true }).fill("수정된 최종 회의록");
   await report.getByRole("textbox", { name: "리스크", exact: true }).fill("원본 음성은 로컬 저장 후 삭제 여부를 확인해야 한다.");
   await page.getByRole("button", { name: "회의록 최종 확정" }).click();
-  await expect(report).toContainText("회의록을 최종 확정했습니다.");
+  await expect(report).toContainText(/회의록을 v\d+으로 최종 확정했습니다./);
+  const minutesCompleteDialog = page.getByRole("alertdialog");
+  await expect(minutesCompleteDialog).toContainText("회의록 저장 완료");
+  await expect(minutesCompleteDialog).toContainText(/회의록을 v\d+으로 최종 확정했습니다./);
+  await minutesCompleteDialog.getByRole("button", { name: "확인" }).click();
 });
 
 test("registers a new organization into the same recording-first workbench", async ({ page }, testInfo) => {
@@ -201,4 +207,46 @@ test("shows a version conflict without overwriting local edits", async ({ page }
   await expect(dialog).toContainText("다른 수정 내용이 먼저 저장되었습니다");
   await expect(dialog).toContainText("서버 저장본을 다시 불러온 뒤 수정 내용을 다시 반영해 주세요.");
   await expect(editor.getByRole("textbox", { name: "전사 문장 1" })).toHaveValue("충돌 시 보존할 로컬 수정 내용");
+});
+
+test("shows actionable minutes generation and version conflict errors", async ({ page }) => {
+  await page.goto("/");
+  await page.getByRole("button", { name: "로그인" }).click();
+  await expect(page.getByRole("heading", { name: "녹음 회의록" })).toBeVisible();
+  const reportTab = page.getByRole("tab", { name: "회의록·보고서" });
+  const report = page.getByRole("region", { name: "AI 분석 보고서" });
+  if (!(await report.isVisible())) await reportTab.click();
+  await expect(report.getByText(/서버 v\d+|서버 저장 전/)).toBeVisible();
+
+  await page.route("**/api/meetings/*/minutes/generate", async (route) => {
+    await route.fulfill({
+      status: 409,
+      contentType: "application/json",
+      body: JSON.stringify({ error: "TRANSCRIPT_REQUIRED" })
+    });
+  });
+  await report.getByRole("button", { name: "AI 보고서 생성" }).click();
+  const dialog = page.getByRole("alertdialog");
+  await expect(dialog).toContainText("최종 전사가 필요합니다");
+  await expect(dialog).toContainText("확정된 전사 TXT가 필요합니다");
+  await dialog.getByRole("button", { name: "확인" }).click();
+  await page.unroute("**/api/meetings/*/minutes/generate");
+
+  const title = report.getByRole("textbox", { name: "제목", exact: true });
+  await title.fill("충돌 시 유지할 회의록 제목");
+  await page.route("**/api/meetings/*/minutes", async (route) => {
+    if (route.request().method() === "PUT") {
+      await route.fulfill({
+        status: 409,
+        contentType: "application/json",
+        body: JSON.stringify({ error: "MINUTES_VERSION_CONFLICT", currentVersion: 99 })
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await report.getByRole("button", { name: "회의록 최종 확정" }).click();
+  await expect(dialog).toContainText("다른 수정 내용이 먼저 저장되었습니다");
+  await expect(dialog).toContainText("다른 사용자가 먼저 회의록을 수정했습니다");
+  await expect(title).toHaveValue("충돌 시 유지할 회의록 제목");
 });
