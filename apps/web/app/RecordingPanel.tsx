@@ -122,6 +122,7 @@ declare global {
   interface Window {
     SpeechRecognition?: new () => LiveSpeechRecognition;
     webkitSpeechRecognition?: new () => LiveSpeechRecognition;
+    webkitAudioContext?: typeof AudioContext;
   }
 }
 
@@ -130,6 +131,12 @@ const storeName = "chunks";
 const microphoneRequestTimeoutMs = 30_000;
 const speechTurnGapMs = 900;
 const maxInlineAudioBytes = 14 * 1024 * 1024;
+const recordingMimeTypeCandidates = [
+  "audio/webm;codecs=opus",
+  "audio/webm",
+  "audio/mp4;codecs=mp4a.40.2",
+  "audio/mp4"
+];
 const defaultParticipants: ParticipantProfile[] = [
   { id: "speaker-1", name: "화자 1" },
   { id: "speaker-2", name: "화자 2" }
@@ -155,6 +162,42 @@ function formatElapsed(seconds: number): string {
 function timecodeToMs(timecode: string): number {
   const [minutes = "0", seconds = "0"] = timecode.split(":");
   return ((Number(minutes) * 60) + Number(seconds)) * 1000;
+}
+
+function preferredRecordingMimeType(): string | undefined {
+  return recordingMimeTypeCandidates.find((mimeType) => {
+    try {
+      return MediaRecorder.isTypeSupported(mimeType);
+    } catch {
+      return false;
+    }
+  });
+}
+
+function recordingExtension(mimeType: string): "m4a" | "ogg" | "webm" {
+  const normalized = mimeType.toLowerCase();
+  if (normalized.includes("mp4") || normalized.includes("aac") || normalized.includes("m4a")) {
+    return "m4a";
+  }
+  if (normalized.includes("ogg")) {
+    return "ogg";
+  }
+  return "webm";
+}
+
+function recordingName(mimeType: string): string {
+  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
+  return `meeting-recording-${timestamp}.${recordingExtension(mimeType)}`;
+}
+
+function formatFileSize(size: number): string {
+  if (size < 1024) {
+    return `${size} bytes`;
+  }
+  if (size < 1024 * 1024) {
+    return `${(size / 1024).toFixed(1)}KB`;
+  }
+  return `${(size / (1024 * 1024)).toFixed(1)}MB`;
 }
 
 function requestMicrophoneStream(): Promise<MediaStream> {
@@ -310,10 +353,13 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const [finalRecordMessage, setFinalRecordMessage] = useState("AI 분석 보고서를 수정한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
   const [recordingFileUrl, setRecordingFileUrl] = useState<string | null>(null);
   const [recordingFileName, setRecordingFileName] = useState("meeting-recording.webm");
+  const [recordingFileSize, setRecordingFileSize] = useState(0);
   const [message, setMessage] = useState("마이크 권한을 허용하면 브라우저 녹음을 시작할 수 있습니다.");
   const mediaRecorderRef = useRef<MediaRecorder | null>(null);
   const streamRef = useRef<MediaStream | null>(null);
   const levelTimerRef = useRef<number | null>(null);
+  const levelAnimationFrameRef = useRef<number | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
   const elapsedSecondsRef = useRef(0);
   const participantsRef = useRef<ParticipantProfile[]>(defaultParticipants);
   const activeParticipantIdRef = useRef(activeParticipantId);
@@ -322,6 +368,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const recordingRequestIdRef = useRef(0);
   const recognitionDraftsRef = useRef<Map<number, RecognitionDraftState>>(new Map());
   const recordedChunksRef = useRef<Blob[]>([]);
+  const recordingBlobRef = useRef<Blob | null>(null);
+  const localChunkStorageFailedRef = useRef(false);
   const minutesPaneRef = useRef<HTMLElement | null>(null);
   const audioFileInputRef = useRef<HTMLInputElement | null>(null);
 
@@ -336,7 +384,6 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         elapsedSecondsRef.current = nextValue;
         return nextValue;
       });
-      setLevel(Math.floor(30 + Math.random() * 65));
     }, 1000);
     levelTimerRef.current = timer;
 
@@ -383,6 +430,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     recognitionShouldRunRef.current = false;
     recognitionRef.current?.stop();
     streamRef.current?.getTracks().forEach((track) => track.stop());
+    stopInputLevelMeter(false);
   }, []);
 
   useEffect(() => () => {
@@ -536,6 +584,56 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     recognitionRef.current?.stop();
   }
 
+  function stopInputLevelMeter(resetLevel = true) {
+    if (levelAnimationFrameRef.current !== null) {
+      window.cancelAnimationFrame(levelAnimationFrameRef.current);
+      levelAnimationFrameRef.current = null;
+    }
+    const audioContext = audioContextRef.current;
+    audioContextRef.current = null;
+    if (audioContext && audioContext.state !== "closed") {
+      void audioContext.close().catch(() => undefined);
+    }
+    if (resetLevel) {
+      setLevel(0);
+    }
+  }
+
+  function startInputLevelMeter(stream: MediaStream) {
+    stopInputLevelMeter();
+    const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
+    if (!AudioContextConstructor) {
+      return;
+    }
+
+    try {
+      const audioContext = new AudioContextConstructor();
+      const source = audioContext.createMediaStreamSource(stream);
+      const analyser = audioContext.createAnalyser();
+      analyser.fftSize = 256;
+      analyser.smoothingTimeConstant = 0.72;
+      source.connect(analyser);
+      const samples = new Uint8Array(analyser.fftSize);
+      audioContextRef.current = audioContext;
+      void audioContext.resume().catch(() => undefined);
+
+      const updateLevel = () => {
+        analyser.getByteTimeDomainData(samples);
+        let sumSquares = 0;
+        for (const sample of samples) {
+          const normalized = (sample - 128) / 128;
+          sumSquares += normalized * normalized;
+        }
+        const rootMeanSquare = Math.sqrt(sumSquares / samples.length);
+        setLevel(Math.min(100, Math.round(rootMeanSquare * 360)));
+        levelAnimationFrameRef.current = window.requestAnimationFrame(updateLevel);
+      };
+      updateLevel();
+    } catch {
+      stopInputLevelMeter();
+    }
+  }
+
   async function startRecording() {
     if (!window.isSecureContext) {
       setState("error");
@@ -545,7 +643,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
 
     if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
       setState("error");
-      setMessage("이 브라우저에서는 마이크 녹음을 사용할 수 없습니다. Chrome 또는 Edge에서 다시 열어주세요.");
+      setMessage("이 브라우저에서는 마이크 녹음을 사용할 수 없습니다. 최신 Safari, Chrome 또는 Edge에서 다시 열어주세요.");
       return;
     }
 
@@ -563,15 +661,19 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       }
       const activeStream = stream;
       streamRef.current = activeStream;
-      const options: MediaRecorderOptions = MediaRecorder.isTypeSupported("audio/webm") ? { mimeType: "audio/webm" } : {};
-      const recorder = new MediaRecorder(activeStream, options);
+      const selectedMimeType = preferredRecordingMimeType();
+      const recorder = new MediaRecorder(activeStream, selectedMimeType ? { mimeType: selectedMimeType } : undefined);
+      const activeMimeType = recorder.mimeType || selectedMimeType || "audio/webm";
       mediaRecorderRef.current = recorder;
       recordedChunksRef.current = [];
+      recordingBlobRef.current = null;
+      localChunkStorageFailedRef.current = false;
       if (recordingFileUrl) {
         URL.revokeObjectURL(recordingFileUrl);
       }
       setRecordingFileUrl(null);
-      setRecordingFileName(`meeting-recording-${new Date().toISOString().replace(/[:.]/g, "-")}.webm`);
+      setRecordingFileName(recordingName(activeMimeType));
+      setRecordingFileSize(0);
       setChunkCount(0);
       setStoredBytes(0);
       setUploadedChunks(0);
@@ -583,7 +685,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       setLiveTranscript([]);
       setWorkspaceView("transcript");
       setTranscriptMessage("말하는 내용이 전사 초안으로 표시됩니다. 잘못된 문장은 바로 고칠 수 있습니다.");
-      setMessage("녹음 중입니다. 청크는 IndexedDB에 임시 저장됩니다.");
+      setMessage(`${recordingExtension(activeMimeType).toUpperCase()} 형식으로 녹음 중입니다. 입력 레벨에서 마이크 반응을 확인할 수 있습니다.`);
+      startInputLevelMeter(activeStream);
 
       recorder.ondataavailable = (event) => {
         if (event.data.size === 0) {
@@ -597,28 +700,58 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             setStoredBytes((value) => value + meta.size);
           })
           .catch(() => {
-            setState("error");
-            setMessage("청크 임시 저장에 실패했습니다. 파일 업로드로 전환해 주세요.");
+            if (!localChunkStorageFailedRef.current) {
+              localChunkStorageFailedRef.current = true;
+              if (recorder.state !== "inactive") {
+                setMessage("기기 임시 저장소를 사용할 수 없지만 녹음은 메모리에서 계속됩니다. 종료 후 바로 저장해 주세요.");
+              }
+            }
           });
+      };
+      recorder.onerror = () => {
+        activeStream.getTracks().forEach((track) => track.stop());
+        stopLiveRecognition();
+        stopInputLevelMeter();
+        mediaRecorderRef.current = null;
+        streamRef.current = null;
+        setState("error");
+        setMessage("모바일 브라우저가 녹음을 중단했습니다. 화면을 켠 상태에서 마이크 권한을 확인한 뒤 다시 시도해 주세요.");
       };
       recorder.onstop = () => {
         activeStream.getTracks().forEach((track) => track.stop());
         stopLiveRecognition();
-        setLevel(0);
+        stopInputLevelMeter();
+        mediaRecorderRef.current = null;
+        streamRef.current = null;
         setState("stopped");
-        const recordingBlob = new Blob(recordedChunksRef.current, { type: recorder.mimeType || "audio/webm" });
+        const finalMimeType = recorder.mimeType || activeMimeType;
+        const recordingBlob = new Blob(recordedChunksRef.current, { type: finalMimeType });
         if (recordingBlob.size > 0) {
+          const fileName = recordingName(finalMimeType);
+          recordingBlobRef.current = recordingBlob;
+          setRecordingFileName(fileName);
+          setRecordingFileSize(recordingBlob.size);
           setRecordingFileUrl(URL.createObjectURL(recordingBlob));
-          setMessage("녹음이 종료되었습니다. 녹음 파일 저장 버튼으로 PC 다운로드 폴더에 저장하세요.");
+          setMessage(`녹음이 완료되었습니다. ${formatFileSize(recordingBlob.size)} · 아래 재생 버튼으로 실제 음성을 확인할 수 있습니다.`);
         } else {
-          setMessage("녹음이 종료되었습니다. 저장할 음성 데이터가 없으면 전사 TXT만 정리할 수 있습니다.");
+          recordingBlobRef.current = null;
+          setRecordingFileSize(0);
+          setMessage("녹음 데이터가 만들어지지 않았습니다. 마이크 권한을 다시 허용하고 화면을 켠 상태에서 재시도해 주세요.");
         }
       };
+      activeStream.getAudioTracks().forEach((track) => {
+        track.addEventListener("ended", () => {
+          if (mediaRecorderRef.current === recorder && recorder.state !== "inactive") {
+            recorder.stop();
+          }
+        }, { once: true });
+      });
       recorder.start(1000);
       startLiveRecognition();
       setState("recording");
     } catch (error) {
       stream?.getTracks().forEach((track) => track.stop());
+      stopInputLevelMeter();
       if (requestId !== recordingRequestIdRef.current) {
         return;
       }
@@ -637,8 +770,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     if (mediaRecorderRef.current?.state === "recording") {
       mediaRecorderRef.current.pause();
       stopLiveRecognition();
+      stopInputLevelMeter();
       setState("paused");
-      setLevel(0);
       setMessage("녹음을 일시 중지했습니다. 재개하면 같은 세션에 이어서 저장됩니다.");
     }
   }
@@ -646,6 +779,9 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   function resumeRecording() {
     if (mediaRecorderRef.current?.state === "paused") {
       mediaRecorderRef.current.resume();
+      if (streamRef.current) {
+        startInputLevelMeter(streamRef.current);
+      }
       startLiveRecognition();
       setState("recording");
       setMessage("녹음을 재개했습니다.");
@@ -653,9 +789,53 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   }
 
   function stopRecording() {
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state !== "inactive") {
-      mediaRecorderRef.current.stop();
+    const recorder = mediaRecorderRef.current;
+    if (recorder && recorder.state !== "inactive") {
+      setMessage("녹음 파일을 마무리하고 있습니다.");
+      try {
+        recorder.requestData();
+      } catch {
+        // Some mobile implementations flush only when stop() is called.
+      }
+      recorder.stop();
     }
+  }
+
+  async function saveRecordingToDevice() {
+    const recordingBlob = recordingBlobRef.current;
+    if (!recordingBlob || !recordingFileUrl) {
+      setMessage("저장할 녹음 파일이 없습니다.");
+      return;
+    }
+
+    const file = new File([recordingBlob], recordingFileName, { type: recordingBlob.type });
+    const shareData = { title: "회의 녹음", files: [file] };
+    if (typeof navigator.share === "function" && navigator.canShare?.(shareData)) {
+      try {
+        await navigator.share(shareData);
+        setMessage("모바일 기기의 공유·파일 저장 화면을 열었습니다.");
+        return;
+      } catch (error) {
+        if (error instanceof DOMException && error.name === "AbortError") {
+          return;
+        }
+      }
+    }
+
+    const download = document.createElement("a");
+    download.href = recordingFileUrl;
+    download.download = recordingFileName;
+    download.click();
+    setMessage("녹음 파일 저장을 시작했습니다.");
+  }
+
+  function analyzeLatestRecording() {
+    const recordingBlob = recordingBlobRef.current;
+    if (!recordingBlob) {
+      setAudioImportMessage("분석할 방금 녹음 파일이 없습니다.");
+      return;
+    }
+    void analyzeExistingAudioFile(new File([recordingBlob], recordingFileName, { type: recordingBlob.type }));
   }
 
   async function confirmLocalChunks() {
@@ -1096,9 +1276,21 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         </div>
       ) : null}
       {recordingFileUrl ? (
-        <a className="button secondary download-link" href={recordingFileUrl} download={recordingFileName}>
-          녹음 파일 저장
-        </a>
+        <div className="recording-result" aria-label="완료된 녹음">
+          <audio aria-label="녹음 재생 확인" controls preload="metadata" src={recordingFileUrl} />
+          <div className="recording-result-actions">
+            <button className="button secondary" type="button" onClick={saveRecordingToDevice}>녹음 파일 저장</button>
+            <button
+              className="button"
+              type="button"
+              onClick={analyzeLatestRecording}
+              disabled={isAnalyzingAudioFile || isGeneratingMinutes}
+            >
+              {isAnalyzingAudioFile ? "방금 녹음 분석 중" : "방금 녹음 AI 분석"}
+            </button>
+            <span className="muted">{recordingExtension(recordingBlobRef.current?.type ?? "audio/webm").toUpperCase()} · {formatFileSize(recordingFileSize)}</span>
+          </div>
+        </div>
       ) : null}
       <div className="audio-import-row">
         <input

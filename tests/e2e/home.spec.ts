@@ -96,7 +96,7 @@ test("preserves rapid speech fragments as separate transcript cards", async ({ p
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
       value: {
-        getUserMedia: async () => ({ getTracks: () => [] })
+        getUserMedia: async () => ({ getTracks: () => [], getAudioTracks: () => [] })
       }
     });
   });
@@ -115,6 +115,95 @@ test("preserves rapid speech fragments as separate transcript cards", async ({ p
     "첫 번째 빠른 문장"
   ]);
   await page.getByRole("button", { name: "종료" }).click();
+});
+
+test("keeps an AAC mobile recording usable when local chunk storage is unavailable", async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockMobileMediaRecorder {
+      static isTypeSupported(mimeType: string) {
+        return mimeType === "audio/mp4;codecs=mp4a.40.2" || mimeType === "audio/mp4";
+      }
+
+      state = "inactive";
+      mimeType: string;
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+
+      constructor(_stream: unknown, options?: { mimeType?: string }) {
+        this.mimeType = options?.mimeType ?? "audio/mp4";
+      }
+
+      emitAudio() {
+        this.ondataavailable?.({ data: new Blob(["mobile-audio"], { type: this.mimeType }) });
+      }
+
+      start() {
+        this.state = "recording";
+        window.setTimeout(() => this.emitAudio(), 20);
+      }
+
+      requestData() {
+        this.emitAudio();
+      }
+
+      pause() {
+        this.state = "paused";
+      }
+
+      resume() {
+        this.state = "recording";
+      }
+
+      stop() {
+        this.state = "inactive";
+        this.onstop?.();
+      }
+    }
+
+    const track = {
+      stop() {},
+      addEventListener() {}
+    };
+    Object.defineProperty(window, "MediaRecorder", {
+      configurable: true,
+      value: MockMobileMediaRecorder
+    });
+    Object.defineProperty(window, "indexedDB", {
+      configurable: true,
+      value: undefined
+    });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: {
+        getUserMedia: async () => ({
+          getTracks: () => [track],
+          getAudioTracks: () => [track]
+        })
+      }
+    });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "로그인" }).click();
+  await page.getByRole("button", { name: "녹음 시작" }).click();
+
+  const recorder = page.getByRole("region", { name: "브라우저 녹음" });
+  await expect(recorder).toContainText("기기 임시 저장소를 사용할 수 없지만 녹음은 메모리에서 계속됩니다.");
+  await expect(page.getByRole("button", { name: "종료" })).toBeEnabled();
+  await page.getByRole("button", { name: "종료" }).click();
+
+  await expect(page.getByLabel("녹음 재생 확인")).toBeVisible();
+  await expect(recorder).toContainText("녹음이 완료되었습니다.");
+  await expect(recorder).toContainText("M4A");
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("button", { name: "녹음 파일 저장" }).click();
+  await expect((await downloadPromise).suggestedFilename()).toMatch(/\.m4a$/);
+
+  await page.getByRole("button", { name: "방금 녹음 AI 분석" }).click();
+  const report = page.getByRole("region", { name: "AI 분석 보고서" });
+  await expect(report).toContainText("전사 TXT 1개를 만들고");
+  await expect(report.getByRole("textbox", { name: "요약", exact: true })).toHaveValue(/기존 녹음 파일에서 전사한 테스트 문장입니다/);
 });
 
 test("records transcript text and finalizes an AI report in the simplified workbench", async ({ page }) => {

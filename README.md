@@ -78,7 +78,7 @@ GEMINI_API_KEY=발급받은_API_키
 GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
-Gemini 모드에서는 수정된 전사 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송하지 않습니다.
+Gemini 모드에서는 수정된 전사 TXT가 Google Gemini API로 전송됩니다. `기존 녹음 파일 AI 분석` 또는 `방금 녹음 AI 분석`을 선택한 경우에만 원본 음성이 분석 요청 동안 Gemini로 전송되며, 앱 서버의 디스크나 DB에는 저장하지 않습니다.
 
 ## Phase 0 범위
 
