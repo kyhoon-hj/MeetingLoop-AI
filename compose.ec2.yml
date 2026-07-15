@@ -26,7 +26,7 @@ services:
       migrate:
         condition: service_completed_successfully
     ports:
-      - "3101:3000"
+      - "127.0.0.1:3101:3000"
     security_opt:
       - no-new-privileges:true
     healthcheck:

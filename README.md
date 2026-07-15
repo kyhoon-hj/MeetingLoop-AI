@@ -79,7 +79,7 @@ docker compose -f compose.ec2.yml logs -f web
 
 `docker compose up -d --build` 한 번으로 migration과 웹 실행을 이어서 수행할 수도 있지만, 위처럼 migration을 먼저 분리 실행하면 실패 시 새 웹 컨테이너로 교체하지 않고 배포를 중단할 수 있습니다.
 
-EC2 보안 그룹에서 테스트할 클라이언트에 대해서만 TCP 3101 인바운드를 허용하면 `http://EC2_PUBLIC_IP:3101`으로 접속할 수 있습니다. 컨테이너 내부에서는 3000번 포트를 사용하고 EC2의 3101번 포트로 전달합니다. 브라우저 마이크 녹음은 HTTPS가 필요하므로 실제 녹음 테스트에는 Nginx 또는 Application Load Balancer와 인증서를 연결해야 합니다.
+컨테이너 내부 3000번 포트는 EC2의 `127.0.0.1:3101`에만 연결되므로 외부에서 3101로 직접 접속할 수 없습니다. Nginx가 `http://127.0.0.1:3101`로 reverse proxy하도록 설정하고 EC2 보안 그룹에는 80과 443만 허용합니다. 브라우저 마이크 녹음은 HTTPS가 필요하므로 `meeting.hjshub.com` 인증서를 연결해야 합니다.
 
 배포 갱신은 최신 코드를 받은 뒤 다시 빌드합니다.
 
