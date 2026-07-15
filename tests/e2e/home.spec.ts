@@ -158,6 +158,7 @@ test("records transcript text and finalizes an AI report in the simplified workb
   await page.getByRole("button", { name: "AI 보고서 생성" }).click();
   const report = page.getByRole("region", { name: "AI 분석 보고서" });
   await expect(report).toContainText("테스트 분석기 (deterministic-test)가 전사 TXT를 분석해 보고서를 생성했습니다.");
+  await expect(report).toContainText("현재 화면 TXT 1개를 사용했습니다.");
   await expect(report.getByRole("textbox", { name: "요약", exact: true })).toHaveValue(/회의 녹음 후 전사 TXT만 서버에 저장/);
   await report.getByRole("textbox", { name: "제목", exact: true }).fill("수정된 최종 회의록");
   await report.getByRole("textbox", { name: "리스크", exact: true }).fill("원본 음성은 로컬 저장 후 삭제 여부를 확인해야 한다.");

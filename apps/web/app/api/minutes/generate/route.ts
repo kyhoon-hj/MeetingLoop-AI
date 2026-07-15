@@ -36,31 +36,32 @@ export async function POST(request: Request) {
   }));
 
   try {
-    let minutes: Awaited<ReturnType<typeof generate>>;
-    try {
-      minutes = await generate();
-    } catch (error) {
-      if (!(error instanceof Error && error.message === "TRANSCRIPT_REQUIRED")) {
-        throw error;
-      }
-      if (!parsed.data.fallbackSegments?.length) {
+    if (parsed.data.fallbackSegments !== undefined) {
+      if (parsed.data.fallbackSegments.length === 0) {
         return NextResponse.json({ error: "TRANSCRIPT_REQUIRED" }, { status: 409 });
       }
-
       await saveDemoTranscriptSegments(session.userId, session.role, {
         organizationId: session.organizationId,
         meetingId: parsed.data.meetingId,
         segments: parsed.data.fallbackSegments
       });
-      minutes = await generate();
     }
+
+    const minutes = await generate();
 
     return NextResponse.json({
       status: "GENERATED",
       provider: { kind: configured.kind, model: configured.model },
+      analysisInput: {
+        source: parsed.data.fallbackSegments !== undefined ? "CURRENT_TRANSCRIPT" : "SAVED_TRANSCRIPT",
+        segmentCount: parsed.data.fallbackSegments?.length ?? 0
+      },
       minutes
     });
   } catch (error) {
+    if (error instanceof Error && error.message === "TRANSCRIPT_REQUIRED") {
+      return NextResponse.json({ error: "TRANSCRIPT_REQUIRED" }, { status: 409 });
+    }
     if (error instanceof MinutesProviderError) {
       const status = error.code === "AI_RATE_LIMITED" ? 429 : error.code === "AI_RESPONSE_INVALID" ? 502 : 503;
       return NextResponse.json({ error: error.code, message: error.message }, { status });

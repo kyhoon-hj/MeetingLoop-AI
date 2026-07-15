@@ -626,6 +626,18 @@ export async function saveDemoTranscriptSegments(userId: string, role: Role, inp
   }
 
   const timestamp = nowIso();
+  const incomingSegmentIds = new Set(
+    parsed.segments.map((segment) => `${parsed.meetingId}-transcript-${segment.clientId}`)
+  );
+  state.transcriptSegments
+    .filter((segment) => segment.organizationId === parsed.organizationId && segment.meetingId === parsed.meetingId)
+    .forEach((segment) => {
+      if (!incomingSegmentIds.has(segment.id) && segment.status !== "DELETED") {
+        segment.status = "DELETED";
+        segment.editedBy = userId;
+        segment.updatedAt = timestamp;
+      }
+    });
   const existingByClientId = new Map(
     state.transcriptSegments
       .filter((segment) => segment.meetingId === parsed.meetingId)

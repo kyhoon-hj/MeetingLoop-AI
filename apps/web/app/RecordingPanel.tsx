@@ -833,8 +833,8 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
 
     setIsGeneratingMinutes(true);
     setMinutesMessage(analysisMode === "ollama"
-      ? "로컬 AI가 저장된 전사 TXT를 분석하고 있습니다."
-      : "Gemini가 저장된 전사 TXT를 분석하고 있습니다.");
+      ? "로컬 AI가 현재 화면의 전사 TXT를 분석하고 있습니다."
+      : "Gemini가 현재 화면의 전사 TXT를 분석하고 있습니다.");
     try {
       const response = await fetch("/api/minutes/generate", {
         method: "POST",
@@ -862,7 +862,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       });
 
       if (response.status === 409) {
-        setMinutesMessage("저장된 전사 TXT가 필요합니다. 전사 저장을 먼저 눌러 주세요.");
+        setMinutesMessage("현재 화면에 분석할 전사 TXT가 없습니다. 문장을 추가하거나 녹음 전사를 받은 뒤 다시 시도해 주세요.");
         return;
       }
       if (!response.ok) {
@@ -874,6 +874,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       const payload = await response.json() as {
         minutes: MinutesDraft;
         provider: { kind: "mock" | AiAnalysisMode; model: string };
+        analysisInput: { source: "CURRENT_TRANSCRIPT" | "SAVED_TRANSCRIPT"; segmentCount: number };
       };
       setMinutesDraft(payload.minutes);
       setWorkspaceView("minutes");
@@ -890,7 +891,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         : payload.provider.kind === "ollama"
           ? "로컬 AI"
           : "테스트 분석기";
-      setMinutesMessage(`${providerLabel} (${payload.provider.model})가 전사 TXT를 분석해 보고서를 생성했습니다.`);
+      setMinutesMessage(`${providerLabel} (${payload.provider.model})가 전사 TXT를 분석해 보고서를 생성했습니다. 현재 화면 TXT ${payload.analysisInput.segmentCount}개를 사용했습니다.`);
     } catch {
       setMinutesMessage("AI 분석 서버에 연결하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.");
     } finally {

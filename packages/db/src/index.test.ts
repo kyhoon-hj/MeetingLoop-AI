@@ -147,9 +147,19 @@ describe("demo organization and project repository", () => {
         editedText: "수정한 전사 문장",
         source: "MANUAL",
         status: "CONFIRMED"
+      }, {
+        clientId: "client-stale",
+        sequence: 1,
+        speakerLabel: "화자 B",
+        startMs: 5000,
+        endMs: 9000,
+        rawText: "이전 녹음 문장",
+        editedText: "다음 저장에서 제외할 문장",
+        source: "MANUAL",
+        status: "CONFIRMED"
       }]
     });
-    expect(firstSave).toHaveLength(1);
+    expect(firstSave).toHaveLength(2);
     expect(firstSave[0]?.rawText).toBe("원본 전사 문장");
     expect(firstSave[0]?.editedText).toBe("수정한 전사 문장");
 
