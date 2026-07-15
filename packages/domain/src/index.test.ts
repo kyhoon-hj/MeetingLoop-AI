@@ -1,5 +1,17 @@
 import { describe, expect, it } from "vitest";
-import { assertMeetingEditorRole, assertProjectManagerRole, assertSameOrganization, createMeetingInputSchema, createProjectInputSchema, meetingSchema, registerOrganizationInputSchema } from "./index";
+import {
+  assertMeetingEditorRole,
+  assertMinutesConfirmerRole,
+  assertMinutesEditorRole,
+  assertProjectManagerRole,
+  assertSameOrganization,
+  assertTranscriptEditorRole,
+  createMeetingInputSchema,
+  createProjectInputSchema,
+  meetingSchema,
+  registerOrganizationInputSchema,
+  transcriptSegmentInputSchema
+} from "./index";
 
 describe("domain model guards", () => {
   it("validates a minimal meeting", () => {
@@ -75,5 +87,32 @@ describe("domain model guards", () => {
     });
     expect(input.fixtureMimeType).toBe("audio/wav");
     expect(() => assertMeetingEditorRole("VIEWER")).toThrow("MEETING_CREATE_FORBIDDEN");
+  });
+
+  it("allows only editors to revise or confirm persisted content", () => {
+    for (const role of ["ORG_ADMIN", "PROJECT_ADMIN", "EDITOR"] as const) {
+      expect(() => assertTranscriptEditorRole(role)).not.toThrow();
+      expect(() => assertMinutesEditorRole(role)).not.toThrow();
+      expect(() => assertMinutesConfirmerRole(role)).not.toThrow();
+    }
+    expect(() => assertTranscriptEditorRole("MEMBER")).toThrow("TRANSCRIPT_EDIT_FORBIDDEN");
+    expect(() => assertMinutesEditorRole("VIEWER")).toThrow("MINUTES_EDIT_FORBIDDEN");
+    expect(() => assertMinutesConfirmerRole("EXTERNAL")).toThrow("MINUTES_CONFIRM_FORBIDDEN");
+  });
+
+  it("accepts only confirmed edited transcript text for server persistence", () => {
+    const confirmed = {
+      clientId: "segment-1",
+      sequence: 0,
+      speakerLabel: "화자 A",
+      startMs: 0,
+      endMs: 1000,
+      editedText: "사용자가 확인한 최종 전사",
+      source: "LIVE" as const,
+      status: "CONFIRMED" as const
+    };
+    expect(transcriptSegmentInputSchema.parse(confirmed).editedText).toContain("최종 전사");
+    expect(() => transcriptSegmentInputSchema.parse({ ...confirmed, status: "DRAFT" })).toThrow();
+    expect(() => transcriptSegmentInputSchema.parse({ ...confirmed, rawText: "수정 전 임시 전사" })).toThrow();
   });
 });

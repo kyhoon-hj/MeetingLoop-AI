@@ -1,9 +1,14 @@
 import { hashPassword, verifyPassword } from "@meetingloop/auth";
+import type { Pool } from "pg";
+import { getDatabasePool } from "./pool";
 import {
   assertProjectManagerRole,
   assertSameOrganization,
   archiveProjectInputSchema,
   assertMeetingEditorRole,
+  assertMinutesConfirmerRole,
+  assertMinutesEditorRole,
+  assertTranscriptEditorRole,
   createProjectInputSchema,
   createMeetingInputSchema,
   generateMinutesInputSchema,
@@ -38,6 +43,8 @@ export interface DatabaseHealth {
   status: HealthStatus;
   databaseUrlConfigured: boolean;
   checkedAt: string;
+  responseTimeMs?: number;
+  errorCode?: "DATABASE_URL_MISSING" | "DATABASE_UNAVAILABLE";
 }
 
 export function getDatabaseHealth(env: NodeJS.ProcessEnv = process.env): DatabaseHealth {
@@ -47,6 +54,43 @@ export function getDatabaseHealth(env: NodeJS.ProcessEnv = process.env): Databas
     checkedAt: new Date().toISOString()
   };
 }
+
+export async function checkDatabaseHealth(
+  env: NodeJS.ProcessEnv = process.env,
+  pool?: Pool
+): Promise<DatabaseHealth> {
+  const startedAt = performance.now();
+  if (!env.DATABASE_URL) {
+    return {
+      status: "degraded",
+      databaseUrlConfigured: false,
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: Math.round(performance.now() - startedAt),
+      errorCode: "DATABASE_URL_MISSING"
+    };
+  }
+
+  try {
+    await (pool ?? getDatabasePool()).query("SELECT 1");
+    return {
+      status: "ok",
+      databaseUrlConfigured: true,
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: Math.round(performance.now() - startedAt)
+    };
+  } catch {
+    return {
+      status: "degraded",
+      databaseUrlConfigured: true,
+      checkedAt: new Date().toISOString(),
+      responseTimeMs: Math.round(performance.now() - startedAt),
+      errorCode: "DATABASE_UNAVAILABLE"
+    };
+  }
+}
+
+export { closeDatabasePool, createDatabasePool, getDatabasePool, getDatabasePoolConfig } from "./pool";
+export { withTransaction } from "./transaction";
 
 interface StoredUser extends User {
   passwordHash: string;
@@ -533,13 +577,11 @@ export async function createDemoMeeting(userId: string, role: Role, input: Creat
   const recording: Recording = {
     id: `${meetingId}-recording-1`,
     meetingId,
-    storageKey: `${parsed.organizationId}/meetings/${meetingId}/fixture/${parsed.fixtureFileName}`,
     originalFileName: parsed.fixtureFileName,
     mimeType: parsed.fixtureMimeType,
     sizeBytes: parsed.fixtureSizeBytes,
     durationMs: 24000,
-    checksum: `fixture-${meetingId}`,
-    uploadStatus: "COMPLETED",
+    storagePolicy: "LOCAL_ONLY",
     processingStatus: "REVIEW",
     createdAt: timestamp
   };
@@ -617,8 +659,8 @@ export async function saveDemoTranscriptSegments(userId: string, role: Role, inp
   const state = await getDemoState();
   const parsed = saveTranscriptSegmentsInputSchema.parse(input);
   const membership = getMembership(state, userId, parsed.organizationId);
-  assertMeetingEditorRole(role);
-  assertMeetingEditorRole(membership.role);
+  assertTranscriptEditorRole(role);
+  assertTranscriptEditorRole(membership.role);
 
   const meeting = state.meetings.find((item) => item.id === parsed.meetingId && item.status !== "ARCHIVED");
   if (meeting) {
@@ -642,7 +684,6 @@ export async function saveDemoTranscriptSegments(userId: string, role: Role, inp
       speakerLabel: segment.speakerLabel,
       startMs: segment.startMs,
       endMs: segment.endMs,
-      rawText: segment.rawText,
       editedText: segment.editedText,
       source: segment.source,
       status: segment.status,
@@ -684,8 +725,8 @@ export async function generateDemoMinutesFromTranscript(
   const state = await getDemoState();
   const parsed = generateMinutesInputSchema.parse(input);
   const membership = getMembership(state, userId, parsed.organizationId);
-  assertMeetingEditorRole(role);
-  assertMeetingEditorRole(membership.role);
+  assertMinutesEditorRole(role);
+  assertMinutesEditorRole(membership.role);
 
   const meeting = state.meetings.find((item) => item.id === parsed.meetingId && item.status !== "ARCHIVED");
   if (meeting) {
@@ -721,12 +762,6 @@ export async function generateDemoMinutesFromTranscript(
     updatedAt: timestamp
   };
 
-  if (existing) {
-    Object.assign(existing, next);
-    return existing;
-  }
-
-  state.minutes.push(next);
   return next;
 }
 
@@ -739,8 +774,8 @@ export async function confirmDemoMinutes(
   const state = await getDemoState();
   const parsed = generateMinutesInputSchema.parse(input);
   const membership = getMembership(state, userId, parsed.organizationId);
-  assertMeetingEditorRole(role);
-  assertMeetingEditorRole(membership.role);
+  assertMinutesConfirmerRole(role);
+  assertMinutesConfirmerRole(membership.role);
 
   let meeting = state.meetings.find((item) => item.id === parsed.meetingId && item.status !== "ARCHIVED");
   if (!meeting) {

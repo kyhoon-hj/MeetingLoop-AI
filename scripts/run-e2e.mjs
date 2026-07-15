@@ -1,7 +1,7 @@
 import { spawn } from "node:child_process";
 
 const host = "127.0.0.1";
-const port = "3000";
+const port = "3210";
 const baseUrl = `http://${host}:${port}`;
 
 function wait(ms) {
@@ -65,7 +65,8 @@ try {
     {
       env: {
         ...process.env,
-        CI: "true"
+        CI: "true",
+        PLAYWRIGHT_BASE_URL: baseUrl
       }
     }
   );

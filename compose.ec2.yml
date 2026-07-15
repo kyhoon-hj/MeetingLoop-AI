@@ -1,4 +1,14 @@
 services:
+  migrate:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: migrator
+    image: meetingloop-ai-migrator:latest
+    restart: "no"
+    env_file:
+      - ${ENV_FILE:-.env.docker}
+
   web:
     build:
       context: .
@@ -8,6 +18,9 @@ services:
     init: true
     env_file:
       - ${ENV_FILE:-.env.docker}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     ports:
       - "3101:3000"
     security_opt:
@@ -17,7 +30,7 @@ services:
         - CMD
         - node
         - -e
-        - "fetch('http://127.0.0.1:3000/api/health').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
+        - "fetch('http://127.0.0.1:3000/api/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"
       interval: 30s
       timeout: 5s
       start_period: 20s

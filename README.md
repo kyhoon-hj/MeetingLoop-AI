@@ -2,6 +2,8 @@
 
 회의 음성, 회의록, 결정, 할 일, 개발 영향 분석을 연결하는 한국어 우선 반응형 웹 플랫폼입니다.
 
+원본 음성은 브라우저에만 보관하며 서버에는 사용자가 확정한 최종 전사와 회의록만 저장합니다. 상세 기준은 [데이터 저장 및 개인정보 처리 정책](docs/DATA_STORAGE_POLICY.md)을 따릅니다.
+
 ## 로컬 실행
 
 ```bash
@@ -10,6 +12,34 @@ docker compose -f infra/docker-compose.yml up -d
 pnpm db:migrate
 pnpm db:seed
 pnpm dev
+```
+
+### 로컬 PostgreSQL
+
+개발 DB의 기본 주소는 `localhost:5432/meeting`입니다.
+
+```dotenv
+DATABASE_URL=postgresql://postgres:change-me@localhost:5432/meeting
+DATABASE_SSL=false
+DB_POOL_MAX=10
+```
+
+PostgreSQL만 Docker로 실행하고 마이그레이션하려면 다음 명령을 사용합니다.
+
+```bash
+docker compose -f infra/docker-compose.yml up -d postgres
+pnpm db:migrate
+pnpm db:seed
+```
+
+개발 seed는 `admin@example.com / ChangeMe123!` 계정을 생성하며 `NODE_ENV=production`에서는 실행되지 않습니다.
+
+기존 `postgres-data` 볼륨이 이미 만들어진 상태에서 `POSTGRES_DB`만 변경하면 `meeting` DB가 자동 생성되지 않습니다. 기존 데이터가 필요 없을 때만 볼륨을 제거하고 다시 실행하거나, 기존 PostgreSQL 관리 계정으로 `meeting` DB를 별도로 생성해야 합니다.
+
+실제 DB 연결 준비 상태는 다음 엔드포인트에서 확인할 수 있습니다.
+
+```text
+GET /api/health/ready
 ```
 
 ## 검증

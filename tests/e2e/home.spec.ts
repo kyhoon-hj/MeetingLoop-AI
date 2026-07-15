@@ -49,8 +49,8 @@ test("records transcript text and finalizes an AI report in the simplified workb
 
   await page.getByRole("button", { name: "문장 추가" }).click();
   await page.getByRole("textbox", { name: "전사 문장 1" }).fill("회의 녹음 후 전사 TXT만 서버에 저장하고 최종 회의록 기록을 남긴다.");
-  await page.getByRole("button", { name: "전사 저장" }).click();
-  await expect(page.getByRole("region", { name: "실시간 전사 편집" })).toContainText("전사 문장 1개를 회의에 저장했습니다.");
+  await page.getByRole("button", { name: "최종 전사 확정" }).click();
+  await expect(page.getByRole("region", { name: "실시간 전사 편집" })).toContainText("최종 전사 1개 문장을 서버에 확정 저장했습니다.");
 
   const reportTab = page.getByRole("tab", { name: "회의록·보고서" });
   if (await reportTab.isVisible()) {
@@ -64,8 +64,8 @@ test("records transcript text and finalizes an AI report in the simplified workb
   await expect(report.getByRole("textbox", { name: "요약", exact: true })).toHaveValue(/회의 녹음 후 전사 TXT만 서버에 저장/);
   await report.getByRole("textbox", { name: "제목", exact: true }).fill("수정된 최종 회의록");
   await report.getByRole("textbox", { name: "리스크", exact: true }).fill("원본 음성은 로컬 저장 후 삭제 여부를 확인해야 한다.");
-  await page.getByRole("button", { name: "최종 서버 저장 기록 남기기" }).click();
-  await expect(report).toContainText("최종 서버 저장 기록을 남겼습니다.");
+  await page.getByRole("button", { name: "회의록 최종 확정" }).click();
+  await expect(report).toContainText("회의록을 최종 확정했습니다.");
 });
 
 test("registers a new organization into the same recording-first workbench", async ({ page }, testInfo) => {

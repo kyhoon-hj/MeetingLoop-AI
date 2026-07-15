@@ -104,7 +104,7 @@ describe("demo organization and project repository", () => {
     expect(bundle.meeting.recordingConsentAt).toBeTruthy();
     expect(bundle.participants).toHaveLength(2);
     expect(bundle.agendas).toHaveLength(2);
-    expect(bundle.recording.uploadStatus).toBe("COMPLETED");
+    expect(bundle.recording.storagePolicy).toBe("LOCAL_ONLY");
 
     await expect(createDemoMeeting("user-viewer", "VIEWER", {
       organizationId: "org-demo",
@@ -143,14 +143,12 @@ describe("demo organization and project repository", () => {
         speakerLabel: "화자 A",
         startMs: 0,
         endMs: 5000,
-        rawText: "원본 전사 문장",
         editedText: "수정한 전사 문장",
         source: "MANUAL",
         status: "CONFIRMED"
       }]
     });
     expect(firstSave).toHaveLength(1);
-    expect(firstSave[0]?.rawText).toBe("원본 전사 문장");
     expect(firstSave[0]?.editedText).toBe("수정한 전사 문장");
 
     await saveDemoTranscriptSegments("user-admin", "ORG_ADMIN", {
@@ -162,7 +160,6 @@ describe("demo organization and project repository", () => {
         speakerLabel: "화자 A",
         startMs: 0,
         endMs: 5000,
-        rawText: "원본 전사 문장",
         editedText: "다시 수정한 전사 문장",
         source: "MANUAL",
         status: "CONFIRMED"
@@ -181,12 +178,11 @@ describe("demo organization and project repository", () => {
         speakerLabel: "화자 B",
         startMs: 5000,
         endMs: 9000,
-        rawText: "권한 없음",
         editedText: "권한 없음",
         source: "MANUAL",
         status: "CONFIRMED"
       }]
-    })).rejects.toThrow("MEETING_CREATE_FORBIDDEN");
+    })).rejects.toThrow("TRANSCRIPT_EDIT_FORBIDDEN");
   });
 
   it("generates minutes from saved transcript text only", async () => {
@@ -226,7 +222,6 @@ describe("demo organization and project repository", () => {
         speakerLabel: "화자 A",
         startMs: 0,
         endMs: 5000,
-        rawText: "원본 음성에서 나온 말",
         editedText: "서버에 저장된 확인 전사 TXT",
         source: "MANUAL",
         status: "CONFIRMED"
@@ -258,5 +253,9 @@ describe("demo organization and project repository", () => {
     expect(minutes.discussionTopics[0]).toContain("논의:");
     expect(minutes.risks).toHaveLength(1);
     expect(minutes.openQuestions).toHaveLength(1);
+
+    const workspaceBeforeConfirmation = await getDemoWorkspace("user-admin", "org-demo");
+    const generatedMeeting = workspaceBeforeConfirmation?.meetings.find((item) => item.meeting.id === bundle.meeting.id);
+    expect(generatedMeeting?.minutes).toBeNull();
   });
 });

@@ -4,7 +4,7 @@ import { useEffect, useRef, useState } from "react";
 
 type RecordingState = "idle" | "requesting" | "recording" | "paused" | "stopped" | "error";
 type UploadState = "idle" | "uploading" | "failed" | "complete";
-type TranscriptStatus = "draft" | "saved";
+type TranscriptStatus = "draft" | "confirmed";
 type AiAnalysisMode = "ollama" | "gemini";
 type WorkspaceView = "minutes" | "transcript";
 
@@ -259,7 +259,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const [aiStatusMessage, setAiStatusMessage] = useState("AI 연결 상태를 확인하고 있습니다.");
   const [isGeneratingMinutes, setIsGeneratingMinutes] = useState(false);
   const [isFinalizingMinutes, setIsFinalizingMinutes] = useState(false);
-  const [finalRecordMessage, setFinalRecordMessage] = useState("AI 분석 보고서를 수정한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
+  const [finalRecordMessage, setFinalRecordMessage] = useState("AI 회의록을 수정한 뒤 최종 확정할 수 있습니다.");
   const [recordingFileUrl, setRecordingFileUrl] = useState<string | null>(null);
   const [recordingFileName, setRecordingFileName] = useState("meeting-recording.webm");
   const [message, setMessage] = useState("마이크 권한을 허용하면 브라우저 녹음을 시작할 수 있습니다.");
@@ -342,7 +342,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       if (existing) {
         return withoutIntro.map((segment) => (
           segment.id === nextId
-            ? { ...segment, text: cleanText, status: isFinal ? "saved" : "draft" }
+            ? { ...segment, text: cleanText, status: "draft" }
             : segment
         ));
       }
@@ -352,7 +352,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         speaker: "화자 A",
         rawText: cleanText,
         text: cleanText,
-        status: isFinal ? "saved" : "draft"
+        status: "draft"
       }];
     });
   }
@@ -614,7 +614,6 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
           speakerLabel: segment.speaker,
           startMs,
           endMs: startMs + 5000,
-          rawText: segment.rawText,
           editedText: segment.text.trim(),
           source: segment.rawText === "새 전사 문장을 입력하세요." ? "MANUAL" : "LIVE",
           status: "CONFIRMED"
@@ -622,7 +621,6 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       });
 
     if (!meetingId) {
-      setLiveTranscript((segments) => segments.map((segment) => ({ ...segment, status: "saved" })));
       setTranscriptMessage("회의를 먼저 생성하면 전사 문장을 DB에 저장할 수 있습니다. 현재는 화면 초안으로만 저장했습니다.");
       return;
     }
@@ -642,12 +640,12 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     });
 
     if (!response.ok) {
-      setTranscriptMessage("전사 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+      setTranscriptMessage("최종 전사 확정에 실패했습니다. 잠시 후 다시 시도해 주세요.");
       return;
     }
 
-    setLiveTranscript((segments) => segments.map((segment) => ({ ...segment, status: "saved" })));
-    setTranscriptMessage(`전사 문장 ${segmentsToSave.length}개를 회의에 저장했습니다. 이후 요약과 할 일 추출의 기준 문장으로 사용할 수 있습니다.`);
+    setLiveTranscript((segments) => segments.map((segment) => ({ ...segment, status: "confirmed" })));
+    setTranscriptMessage(`최종 전사 ${segmentsToSave.length}개 문장을 서버에 확정 저장했습니다. 이후 요약과 할 일 추출의 기준으로 사용합니다.`);
   }
 
   async function generateMinutesDraft() {
@@ -677,7 +675,6 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
                 speakerLabel: segment.speaker,
                 startMs,
                 endMs: startMs + 5000,
-                rawText: segment.rawText,
                 editedText: segment.text.trim(),
                 source: segment.rawText === "새 전사 문장을 입력하세요." ? "MANUAL" : "LIVE",
                 status: "CONFIRMED"
@@ -687,7 +684,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       });
 
       if (response.status === 409) {
-        setMinutesMessage("저장된 전사 TXT가 필요합니다. 전사 저장을 먼저 눌러 주세요.");
+        setMinutesMessage("확정된 전사 TXT가 필요합니다. 최종 전사 확정을 먼저 눌러 주세요.");
         return;
       }
       if (!response.ok) {
@@ -744,12 +741,12 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
 
   async function finalizeMinutesDraft() {
     if (!meetingId || !minutesDraft) {
-      setFinalRecordMessage("AI 분석 보고서를 먼저 생성한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
+      setFinalRecordMessage("AI 회의록을 먼저 생성한 뒤 최종 확정할 수 있습니다.");
       return;
     }
 
     setIsFinalizingMinutes(true);
-    setFinalRecordMessage("수정한 AI 분석 보고서를 최종 기록으로 서버에 저장합니다.");
+    setFinalRecordMessage("수정한 회의록을 최종 확정하여 서버에 저장합니다.");
     try {
       const response = await fetch("/api/minutes/finalize", {
         method: "POST",
@@ -761,13 +758,13 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       });
 
       if (!response.ok) {
-        setFinalRecordMessage("최종 서버 저장 기록을 남기지 못했습니다. 잠시 후 다시 시도해 주세요.");
+        setFinalRecordMessage("회의록을 최종 확정하지 못했습니다. 잠시 후 다시 시도해 주세요.");
         return;
       }
 
       const payload = await response.json() as { minutes: MinutesDraft };
       setMinutesDraft(payload.minutes);
-      setFinalRecordMessage("최종 서버 저장 기록을 남겼습니다. 서버에는 전사 TXT와 확정 회의록만 저장됩니다.");
+      setFinalRecordMessage("회의록을 최종 확정했습니다. 서버에는 최종 전사 TXT와 확정 회의록만 저장됩니다.");
     } finally {
       setIsFinalizingMinutes(false);
     }
@@ -905,7 +902,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             <strong>{analysisMode === "ollama" ? "로컬 AI" : "Gemini"}</strong>
             <span>{selectedAiStatus ? `${selectedAiStatus.model} · ${selectedAiStatus.message}` : aiStatusMessage}</span>
             {analysisMode === "gemini" && selectedAiStatus?.available ? (
-              <span>분석할 전사 TXT가 Google Gemini API로 전송됩니다.</span>
+              <span>분석할 최종 전사 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송되지 않습니다.</span>
             ) : null}
           </div>
           {minutesDraft ? (
@@ -954,7 +951,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
               </label>
               <div className="minutes-footer full-width">
                 <button className="button" type="button" onClick={finalizeMinutesDraft} disabled={isFinalizingMinutes}>
-                  최종 서버 저장 기록 남기기
+                  회의록 최종 확정
                 </button>
                 <p className="muted">{finalRecordMessage}</p>
               </div>
@@ -973,7 +970,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             </div>
             <div className="toolbar">
               <button className="button secondary" type="button" onClick={addManualTranscriptSegment}>문장 추가</button>
-              <button className="button" type="button" onClick={saveTranscriptDraft}>전사 저장</button>
+              <button className="button" type="button" onClick={saveTranscriptDraft}>최종 전사 확정</button>
             </div>
           </div>
           <div className="live-segment-list">
@@ -982,7 +979,7 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
                 <div className="live-segment-meta">
                   <span>{segment.timecode}</span>
                   <span>{segment.speaker}</span>
-                  <span>{segment.status === "saved" ? "저장됨" : "수정 중"}</span>
+                  <span>{segment.status === "confirmed" ? "최종 확정" : "로컬 수정 중"}</span>
                   <button
                     className="icon-button delete-segment-button"
                     type="button"

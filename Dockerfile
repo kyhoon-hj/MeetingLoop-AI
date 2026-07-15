@@ -31,6 +31,12 @@ COPY packages/storage packages/storage
 COPY packages/ui packages/ui
 RUN pnpm --filter @meetingloop/web build
 
+FROM dependencies AS migrator
+ENV NODE_ENV=production
+COPY packages/db/migrations packages/db/migrations
+COPY packages/db/scripts packages/db/scripts
+CMD ["node", "packages/db/scripts/migrate.mjs"]
+
 FROM node:22-bookworm-slim AS runner
 ENV NODE_ENV=production
 ENV HOSTNAME=0.0.0.0

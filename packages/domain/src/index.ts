@@ -154,13 +154,11 @@ export const agendaSchema = z.object({
 export const recordingSchema = z.object({
   id: z.string().min(1),
   meetingId: z.string().min(1),
-  storageKey: z.string().min(1),
   originalFileName: z.string().min(1),
   mimeType: z.string().min(1),
   sizeBytes: z.number().int().nonnegative(),
   durationMs: z.number().int().nonnegative(),
-  checksum: z.string().min(1),
-  uploadStatus: z.enum(["PENDING", "UPLOADING", "COMPLETED", "FAILED"]),
+  storagePolicy: z.literal("LOCAL_ONLY"),
   processingStatus: meetingStatusSchema,
   createdAt: z.string().datetime()
 });
@@ -173,10 +171,9 @@ export const transcriptSegmentSchema = z.object({
   speakerLabel: z.string().min(1).max(80),
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().nonnegative(),
-  rawText: z.string().min(1).max(4000),
   editedText: z.string().min(1).max(4000),
   source: z.enum(["LIVE", "MANUAL", "STT"]),
-  status: z.enum(["DRAFT", "CONFIRMED", "DELETED"]),
+  status: z.enum(["CONFIRMED", "DELETED"]),
   editedBy: z.string().min(1),
   createdAt: z.string().datetime(),
   updatedAt: z.string().datetime()
@@ -188,11 +185,10 @@ export const transcriptSegmentInputSchema = z.object({
   speakerLabel: z.string().min(1).max(80),
   startMs: z.number().int().nonnegative(),
   endMs: z.number().int().nonnegative(),
-  rawText: z.string().min(1).max(4000),
   editedText: z.string().min(1).max(4000),
   source: z.enum(["LIVE", "MANUAL", "STT"]).default("MANUAL"),
-  status: z.enum(["DRAFT", "CONFIRMED"]).default("CONFIRMED")
-});
+  status: z.literal("CONFIRMED").default("CONFIRMED")
+}).strict();
 
 export const saveTranscriptSegmentsInputSchema = z.object({
   organizationId: z.string().min(1),
@@ -283,5 +279,25 @@ export function assertProjectManagerRole(role: Role): void {
 export function assertMeetingEditorRole(role: Role): void {
   if (role !== "ORG_ADMIN" && role !== "PROJECT_ADMIN" && role !== "EDITOR") {
     throw new Error("MEETING_CREATE_FORBIDDEN");
+  }
+}
+
+const contentEditorRoles: ReadonlySet<Role> = new Set(["ORG_ADMIN", "PROJECT_ADMIN", "EDITOR"]);
+
+export function assertTranscriptEditorRole(role: Role): void {
+  if (!contentEditorRoles.has(role)) {
+    throw new Error("TRANSCRIPT_EDIT_FORBIDDEN");
+  }
+}
+
+export function assertMinutesEditorRole(role: Role): void {
+  if (!contentEditorRoles.has(role)) {
+    throw new Error("MINUTES_EDIT_FORBIDDEN");
+  }
+}
+
+export function assertMinutesConfirmerRole(role: Role): void {
+  if (!contentEditorRoles.has(role)) {
+    throw new Error("MINUTES_CONFIRM_FORBIDDEN");
   }
 }
