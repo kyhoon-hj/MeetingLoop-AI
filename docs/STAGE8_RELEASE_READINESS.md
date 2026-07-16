@@ -6,12 +6,13 @@
 ## 1. 소스 기준선
 
 - branch: `codex/stage2-persistence-schema`
-- base commit: `9d3453309780b156735d1a57e1a25afd63b95f67`
+- integration commit: `105ade5171ded9a59beeae26d46bc46ef8cffc3d`
+- draft PR: `#1` (`codex/stage2-persistence-schema` -> `main`)
 - Node.js: `v24.15.0`
 - pnpm: `11.7.0`
 - Docker: `29.5.3`
 - Docker Compose: `5.1.4`
-- 단계 0~8 변경은 아직 commit/tag되지 않은 working tree에 있다. 실제 배포 전 변경 검토, commit, immutable tag가 필요하다.
+- 단계 0~8 변경은 integration commit으로 고정해 원격 branch와 draft PR에 반영했다. 실제 배포 전 PR 검토/병합과 immutable release tag가 필요하다.
 
 ## 2. 자동 검증 결과
 
@@ -80,7 +81,7 @@ docker compose -p meetingloop-stage8 -f compose.ec2.yml -f compose.stage8-smoke.
 
 ## 6. 실제 서버 배포 전 남은 게이트
 
-1. working tree를 검토하고 commit/tag해 배포 소스를 불변으로 만든다.
+1. draft PR `#1`을 검토해 `main`에 병합하고 병합 commit에 immutable release tag를 만든다.
 2. 운영 PostgreSQL major를 확인하고 `POSTGRES_OPS_VERSION`을 동일하게 설정한다.
 3. 운영 DB 복제본에서 backup→restore→`0007` migration dry-run을 수행해 `INT-0809`를 완료한다.
 4. `.env.docker`의 `SESSION_SECRET`, `APP_URL`, DB SSL, Gemini/Ollama 설정을 운영 값으로 채우고 예시 값이 남지 않았는지 검사한다.
