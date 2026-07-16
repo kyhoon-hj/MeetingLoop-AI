@@ -1,4 +1,4 @@
-import { ensureQuickCaptureMeeting, getWorkspace } from "@meetingloop/db";
+import { ensureQuickCaptureMeeting, getMeetingDetail, getWorkspace } from "@meetingloop/db";
 import { loginAction, registerAction } from "./actions";
 import AppHeader from "./AppHeader";
 import RecordingPanel from "./RecordingPanel";
@@ -55,6 +55,9 @@ export default async function HomePage({ searchParams }: {
     ? workspace?.meetings.find((item) => item.meeting.id === params.meetingId)
     : null;
   const activeMeeting = requestedMeeting ?? workspace?.meetings.at(-1);
+  const activeMeetingDetail = workspace && activeMeeting
+    ? await getMeetingDetail(workspace.user.id, workspace.organization.id, activeMeeting.meeting.id)
+    : null;
 
   if (!workspace) {
     return (
@@ -142,7 +145,14 @@ export default async function HomePage({ searchParams }: {
               <span>전사 {activeMeeting.transcriptSegmentCount}개 · 최종 기록 {activeMeeting.minutes?.status === "CONFIRMED" ? "저장됨" : "대기"}</span>
             </div>
           ) : null}
-          <RecordingPanel meetingId={activeMeeting?.meeting.id} initialView={params?.view === "minutes" ? "minutes" : "transcript"} />
+          <RecordingPanel
+            key={activeMeeting?.meeting.id ?? "no-meeting"}
+            meetingId={activeMeeting?.meeting.id}
+            organizationId={workspace.organization.id}
+            recordingConsentRecorded={Boolean(activeMeeting?.meeting.recordingConsentAt)}
+            initialView={params?.view === "minutes" ? "minutes" : "transcript"}
+            participants={activeMeetingDetail?.participants.map((participant) => ({ id: participant.id, displayName: participant.displayName })) ?? []}
+          />
         </div>
       </section>
     </main>

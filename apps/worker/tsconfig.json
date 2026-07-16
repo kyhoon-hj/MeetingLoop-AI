@@ -8,6 +8,8 @@
   },
   "references": [
     { "path": "../../packages/ai" },
+    { "path": "../../packages/db" },
+    { "path": "../../packages/domain" },
     { "path": "../../packages/queue" }
   ],
   "include": ["src/**/*.ts"],

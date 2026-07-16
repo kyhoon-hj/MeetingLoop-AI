@@ -142,12 +142,14 @@ test("lists meetings, pages results, opens detail, and shows controlled read err
     await expect(page.getByRole("region", { name: "AI 분석 보고서" })).toBeVisible();
 
     await page.goto("/meetings?cursor=invalid-cursor");
-    await expect(page.getByRole("alert")).toContainText("페이지 정보를 확인할 수 없습니다");
-    await expect(page.getByRole("alert")).toContainText("첫 페이지부터 다시 조회해 주세요");
+    const invalidCursorAlert = page.locator(".empty-state[role='alert']");
+    await expect(invalidCursorAlert).toContainText("페이지 정보를 확인할 수 없습니다");
+    await expect(invalidCursorAlert).toContainText("첫 페이지부터 다시 조회해 주세요");
 
     await page.goto("/meetings/meeting-does-not-exist");
-    await expect(page.getByRole("alert")).toContainText("회의를 찾을 수 없습니다");
-    await expect(page.getByRole("alert")).toContainText("현재 조직에서 접근할 수 없는 회의입니다");
+    const notFoundAlert = page.locator(".empty-state[role='alert']");
+    await expect(notFoundAlert).toContainText("회의를 찾을 수 없습니다");
+    await expect(notFoundAlert).toContainText("현재 조직에서 접근할 수 없는 회의입니다");
   } finally {
     const client = new Client({ connectionString: process.env.DATABASE_URL });
     await client.connect();

@@ -24,14 +24,21 @@ async function waitForTranscriptState(page: Page) {
   return editor;
 }
 
+async function loginAndWaitForWorkbench(page: Page) {
+  await page.getByRole("button", { name: "로그인" }).click();
+  await expect(page.getByRole("button", { name: "로그아웃" })).toBeVisible();
+  await waitForTranscriptState(page);
+}
+
 async function clearTranscriptEditor(page: Page) {
   const editor = await waitForTranscriptState(page);
   const deleteButtons = editor.locator(".delete-segment-button");
-  const count = await deleteButtons.count();
-  for (let index = 0; index < count; index += 1) {
+  while (await deleteButtons.count() > 0) {
+    const before = await deleteButtons.count();
     await deleteButtons.first().click();
+    await expect(deleteButtons).toHaveCount(before - 1);
   }
-  await expect(editor.locator("textarea")).toHaveCount(0);
+  await expect(editor.locator(".transcript-review-segment")).toHaveCount(0);
   return editor;
 }
 
@@ -63,6 +70,141 @@ test("shows a recoverable state while microphone permission is pending", async (
   await page.getByRole("button", { name: "권한 요청 취소" }).click();
   await expect(recorder).toContainText("마이크 권한 요청을 취소했습니다.");
   await expect(page.getByRole("button", { name: "녹음 시작" })).toBeEnabled();
+});
+
+test("checks microphone quality for five seconds entirely in the browser", async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockAudioContext {
+      sampleRate = 48000;
+      state = "running";
+      createMediaStreamSource() { return { connect() {} }; }
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          smoothingTimeConstant: 0,
+          getByteTimeDomainData(samples: Uint8Array) {
+            samples.forEach((_, index) => { samples[index] = 128 + Math.round(Math.sin(index / 4) * 18); });
+          }
+        };
+      }
+      async resume() {}
+      async close() { this.state = "closed"; }
+    }
+    const track = { stop() {}, getSettings() { return { channelCount: 1 }; } };
+    Object.defineProperty(window, "AudioContext", { configurable: true, value: MockAudioContext });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }) }
+    });
+  });
+
+  const rawAudioRequests: string[] = [];
+  page.on("request", (request) => {
+    const contentType = request.headers()["content-type"] ?? "";
+    if (/audio|recordings\/(chunks|analyze-file)|audio\/(quality|normalize|vad|overlap)/i.test(`${contentType} ${request.url()}`)) {
+      rawAudioRequests.push(request.url());
+    }
+  });
+  await page.goto("/");
+  await page.getByRole("button", { name: "로그인" }).click();
+  await page.getByRole("button", { name: "마이크 5초 점검" }).click();
+
+  await expect(page.getByRole("button", { name: /점검 중/ })).toBeDisabled();
+  const recorder = page.getByRole("region", { name: "브라우저 녹음" });
+  await expect(recorder).toContainText("입력 품질 100점", { timeout: 8_000 });
+  await expect(recorder).toContainText("저음량 0%");
+  expect(rawAudioRequests).toEqual([]);
+});
+
+test("keeps a mobile AAC recording in memory when IndexedDB is unavailable", async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockAudioContext {
+      sampleRate = 48000;
+      state = "running";
+      createMediaStreamSource() { return { connect() {} }; }
+      createAnalyser() {
+        return {
+          fftSize: 256,
+          smoothingTimeConstant: 0,
+          getByteTimeDomainData(samples: Uint8Array) {
+            samples.forEach((_, index) => { samples[index] = 128 + Math.round(Math.sin(index / 4) * 18); });
+          }
+        };
+      }
+      async resume() {}
+      async close() { this.state = "closed"; }
+    }
+    class MockMobileMediaRecorder {
+      static isTypeSupported(mimeType: string) { return mimeType.startsWith("audio/mp4"); }
+      state = "inactive";
+      mimeType: string;
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      onerror: (() => void) | null = null;
+      constructor(_stream: unknown, options?: { mimeType?: string }) { this.mimeType = options?.mimeType ?? "audio/mp4"; }
+      start() {
+        this.state = "recording";
+        window.setTimeout(() => this.ondataavailable?.({ data: new Blob(["mobile-audio"], { type: this.mimeType }) }), 20);
+      }
+      pause() { this.state = "paused"; }
+      resume() { this.state = "recording"; }
+      stop() { this.state = "inactive"; this.onstop?.(); }
+    }
+    const track = { stop() {}, getSettings() { return { channelCount: 1 }; } };
+    Object.defineProperty(window, "AudioContext", { configurable: true, value: MockAudioContext });
+    Object.defineProperty(window, "MediaRecorder", { configurable: true, value: MockMobileMediaRecorder });
+    Object.defineProperty(window, "indexedDB", { configurable: true, value: undefined });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }) }
+    });
+  });
+
+  await page.goto("/");
+  await loginAndWaitForWorkbench(page);
+  await page.getByRole("button", { name: "녹음 시작" }).click();
+  const recorder = page.getByRole("region", { name: "브라우저 녹음" });
+  await expect(recorder).toContainText("메모리에 임시 보관 중", { timeout: 5_000 });
+  await page.getByRole("button", { name: "종료" }).click();
+
+  await expect(page.getByLabel("녹음 재생 확인")).toBeVisible();
+  await expect(recorder).toContainText("M4A");
+  await expect(page.getByRole("region", { name: "녹음 품질 리포트" })).toContainText(/녹음 품질 \d+점/);
+  const downloadPromise = page.waitForEvent("download");
+  await page.getByRole("link", { name: "녹음 파일 저장" }).click();
+  expect((await downloadPromise).suggestedFilename()).toMatch(/\.m4a$/);
+});
+
+test("shows that an offline browser keeps the recording controls available", async ({ page }) => {
+  await page.addInitScript(() => {
+    class MockMediaRecorder {
+      static isTypeSupported() { return true; }
+      state = "inactive";
+      mimeType = "audio/webm";
+      ondataavailable: ((event: { data: Blob }) => void) | null = null;
+      onstop: (() => void) | null = null;
+      start() { this.state = "recording"; }
+      pause() { this.state = "paused"; }
+      resume() { this.state = "recording"; }
+      stop() { this.state = "inactive"; this.onstop?.(); }
+    }
+    const track = { stop() {}, getSettings() { return { channelCount: 1 }; } };
+    Object.defineProperty(window, "MediaRecorder", { configurable: true, value: MockMediaRecorder });
+    Object.defineProperty(navigator, "mediaDevices", {
+      configurable: true,
+      value: { getUserMedia: async () => ({ getTracks: () => [track], getAudioTracks: () => [track] }) }
+    });
+    Object.defineProperty(navigator, "onLine", { configurable: true, get: () => false });
+  });
+
+  await page.goto("/");
+  await page.getByRole("button", { name: "로그인" }).click();
+  const recorder = page.getByRole("region", { name: "브라우저 녹음" });
+  await expect(recorder.getByRole("status").filter({ hasText: "오프라인 · 로컬 저장" })).toBeVisible();
+  await page.getByRole("button", { name: "녹음 시작" }).click();
+  await expect(recorder).toContainText("오프라인 상태에서도 녹음을 계속합니다");
+  await expect(page.getByRole("button", { name: "종료" })).toBeEnabled();
+  await page.getByRole("button", { name: "종료" }).click();
 });
 
 test("records transcript text and finalizes an AI report in the simplified workbench", async ({ page }) => {
@@ -134,6 +276,56 @@ test("registers a new organization into the same recording-first workbench", asy
     await expect(page.getByRole("heading", { name: "녹음 회의록" })).toBeVisible();
     await expect(page.getByText("회의 준비")).toHaveCount(0);
     await waitForTranscriptState(page);
+  } finally {
+    await deleteRegisteredTestAccount(email, organizationSlug);
+  }
+});
+
+test("reviews speaker, dictionary, transcript layers and decision evidence in browser storage", async ({ page }, testInfo) => {
+  await page.goto("/");
+  await page.getByText("새 조직 만들기").click();
+  const suffix = `review-${testInfo.project.name}-${Date.now().toString().slice(-6)}`.toLowerCase();
+  const email = `${suffix}@example.com`;
+  const organizationSlug = `e2e-${suffix}`;
+  try {
+    await page.getByLabel("이름").fill("검토 관리자");
+    await page.getByLabel("이메일").last().fill(email);
+    await page.getByLabel("비밀번호").last().fill("ChangeMe123!");
+    await page.getByLabel("조직명").fill("검토 테스트 조직");
+    await page.getByLabel("조직 주소").fill(organizationSlug);
+    await page.getByRole("button", { name: "회원가입 및 조직 생성" }).click();
+    const editor = await clearTranscriptEditor(page);
+
+    await editor.getByRole("button", { name: "문장 추가" }).click();
+    await editor.getByRole("textbox", { name: "전사 문장 1" }).fill("미팅루프 도입을 결정했습니다.");
+    await editor.getByLabel("화자 이름").fill("김검토");
+    await expect(editor).toContainText("1 결정 차단");
+
+    const reviewPanel = editor.locator(".review-tool-panel").filter({ hasText: "추출 항목·근거 검토" });
+    const evidenceButton = reviewPanel.getByRole("button", { name: "근거 확인" });
+    await evidenceButton.scrollIntoViewIfNeeded();
+    await evidenceButton.click();
+    const approveButton = reviewPanel.getByRole("button", { name: "승인" });
+    await expect(approveButton).toBeEnabled();
+    await approveButton.click();
+    await expect(editor).toContainText("0 결정 차단");
+
+    await editor.getByText("프로젝트 사전 · 적용 이력").click();
+    await editor.getByLabel("표준 용어").fill("MeetingLoop");
+    await editor.getByLabel("별칭(| 구분)").fill("미팅루프");
+    await editor.getByRole("button", { name: "추가", exact: true }).click();
+    await editor.getByRole("button", { name: "전체 전사에 적용" }).click();
+    await expect(editor.getByRole("textbox", { name: "전사 문장 1" })).toHaveValue("MeetingLoop 도입을 결정했습니다.");
+
+    await editor.getByRole("button", { name: "구간 재처리" }).click();
+    await editor.getByText(/이 구간 편집 이력/).click();
+    await expect(editor).toContainText("REPROCESS");
+
+    await page.waitForTimeout(350);
+    await page.reload();
+    const restored = await waitForTranscriptState(page);
+    await expect(restored.getByRole("textbox", { name: "전사 문장 1" })).toHaveValue("미팅루프 도입을 결정했습니다.");
+    await expect(restored).toContainText("이 브라우저에 저장된 화자·사전·검토 초안을 복원했습니다.");
   } finally {
     await deleteRegisteredTestAccount(email, organizationSlug);
   }

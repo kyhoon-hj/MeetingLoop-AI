@@ -9,9 +9,12 @@
   },
   "dependencies": {
     "@meetingloop/ai": "workspace:*",
+    "@meetingloop/db": "workspace:*",
+    "@meetingloop/domain": "workspace:*",
     "@meetingloop/queue": "workspace:*"
   },
   "devDependencies": {
+    "esbuild": "^0.25.0",
     "tsx": "^4.20.3"
   }
 }

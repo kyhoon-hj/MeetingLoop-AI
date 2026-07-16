@@ -19,7 +19,9 @@ if (!databaseUrl) {
   process.exit(1);
 }
 
-const migrationsDirectory = path.resolve(scriptDirectory, "../migrations");
+const migrationsDirectory = process.env.MIGRATIONS_DIRECTORY?.trim()
+  ? path.resolve(process.env.MIGRATIONS_DIRECTORY)
+  : path.resolve(scriptDirectory, "../migrations");
 const migrationLockId = 724_190_001;
 const client = new pg.Client({
   connectionString: databaseUrl,

@@ -11,6 +11,7 @@
     "typecheck": "tsc -b",
     "test": "vitest run --environment node --exclude \"**/*.integration.test.ts\" --exclude \"tests/e2e/**\" --exclude \"**/dist/**\"",
     "test:integration": "vitest run tests/integration --environment node --testTimeout 15000",
+    "test:redis": "vitest run tests/redis --environment node --testTimeout 15000",
     "test:e2e": "node scripts/run-e2e.mjs",
     "build": "pnpm -r build",
     "db:migrate": "pnpm --filter @meetingloop/db db:migrate",

@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { formatTranscriptText, getTranscript } from "@meetingloop/db";
 import { databaseErrorResponse } from "../../../../api-errors";
 import { getSessionPayload } from "../../../../session";
+import { logUnexpectedServerError } from "../../../../server-error";
 
 interface RouteContext {
   params: Promise<{ meetingId: string }>;
@@ -22,6 +23,9 @@ export async function GET(_request: Request, context: RouteContext) {
       }
     });
   } catch (error) {
-    return databaseErrorResponse(error) ?? NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
+    const response = databaseErrorResponse(error);
+    if (response) return response;
+    logUnexpectedServerError("transcript.txt.get", error);
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

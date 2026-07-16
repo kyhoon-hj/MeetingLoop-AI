@@ -94,7 +94,7 @@ export default function NewMeetingForm({ projects, defaultParticipantName }: {
         </div>
         <label className="check-row">
           <input name="consentConfirmed" type="checkbox" aria-label="녹음 동의 확인" data-field-label="녹음 동의 확인" required />
-          <span>모든 참석자에게 녹음 사실과 최종 전사가 외부 AI로 전송될 수 있음을 안내했으며 동의를 확인했습니다.</span>
+          <span>모든 참석자에게 녹음 사실을 안내했으며, 원본 음성이 서버가 아니라 이 브라우저에만 보관되는 것에 동의했음을 확인했습니다. 외부 AI 전송은 분석 실행 직전에 별도로 동의합니다.</span>
         </label>
       </section>
 

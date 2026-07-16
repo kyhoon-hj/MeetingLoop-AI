@@ -2,6 +2,12 @@ import { NextResponse } from "next/server";
 import { getMinutes, MinutesVersionConflictError, saveMinutes } from "@meetingloop/db";
 import { saveMinutesInputSchema } from "@meetingloop/domain";
 import { databaseErrorResponse } from "../../../../api-errors";
+import {
+  assertRequestScope,
+  maxMinutesRequestBytes,
+  readIdempotencyKey,
+  readLimitedJson
+} from "../../../../api-request";
 import { getSessionPayload } from "../../../../session";
 import { logUnexpectedServerError } from "../../../../server-error";
 
@@ -34,21 +40,16 @@ export async function PUT(request: Request, context: RouteContext) {
   const session = await getSessionPayload();
   if (!session) return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
   const { meetingId } = await context.params;
-  let body: unknown;
   try {
-    body = await request.json();
-  } catch {
-    return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
-  }
-  const parsed = saveMinutesInputSchema.safeParse({
-    ...(typeof body === "object" && body !== null ? body : {}),
-    organizationId: session.organizationId,
-    meetingId
-  });
-  if (!parsed.success) return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
-
-  try {
-    const minutes = await saveMinutes(session.userId, parsed.data);
+    const body = await readLimitedJson(request, maxMinutesRequestBytes);
+    assertRequestScope(body, { organizationId: session.organizationId, meetingId });
+    const parsed = saveMinutesInputSchema.safeParse({
+      ...(typeof body === "object" && body !== null ? body : {}),
+      organizationId: session.organizationId,
+      meetingId
+    });
+    if (!parsed.success) return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
+    const minutes = await saveMinutes(session.userId, parsed.data, { idempotencyKey: readIdempotencyKey(request) });
     return NextResponse.json({ status: "CONFIRMED", minutes });
   } catch (error) {
     if (error instanceof MinutesVersionConflictError) {

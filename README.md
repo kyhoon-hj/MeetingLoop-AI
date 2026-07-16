@@ -64,17 +64,21 @@ cp .env.docker.example .env.docker
 openssl rand -base64 48
 ```
 
-생성한 값을 `.env.docker`의 `SESSION_SECRET`에 넣고 `APP_URL`, AI 제공자 설정을 수정합니다. 그다음 이미지를 빌드하고 실행합니다.
+생성한 값을 `.env.docker`의 `SESSION_SECRET`에 넣고 `APP_URL`, AI 제공자 설정을 수정합니다. `POSTGRES_OPS_VERSION`은 운영 PostgreSQL major와 같아야 합니다. 그다음 이미지를 빌드하고 실행합니다.
 
 PostgreSQL이 같은 EC2 호스트에서 실행 중이면 예시처럼 `host.docker.internal`을 사용합니다. 이 이름은 `compose.ec2.yml`의 `host-gateway` 설정으로 EC2 호스트에 연결됩니다. PostgreSQL의 `listen_addresses`와 `pg_hba.conf`에는 Docker bridge 대역의 접속을 허용해야 하며, EC2 보안 그룹에서 5432 포트를 외부에 공개할 필요는 없습니다. 운영 RDS를 사용한다면 `DATABASE_URL`의 호스트를 RDS endpoint로 바꾸고 `DATABASE_SSL=true`를 적용합니다.
 
 ```bash
 docker compose -f compose.ec2.yml build
+docker compose -f compose.ec2.yml --profile ops build db-backup
+docker compose -f compose.ec2.yml --profile ops run --rm db-backup
+docker compose -f compose.ec2.yml up -d --no-build redis
 docker compose -f compose.ec2.yml run --rm migrate
-docker compose -f compose.ec2.yml up -d --no-build --no-deps web
+docker compose -f compose.ec2.yml up -d --no-build --no-deps web worker
 docker compose -f compose.ec2.yml ps
 curl --fail http://127.0.0.1:3101/api/health/ready
-docker compose -f compose.ec2.yml logs -f web
+docker compose -f compose.ec2.yml exec worker node -e "fetch('http://127.0.0.1:3001/health/ready').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log)"
+docker compose -f compose.ec2.yml logs -f web worker
 ```
 
 `docker compose up -d --build` 한 번으로 migration과 웹 실행을 이어서 수행할 수도 있지만, 위처럼 migration을 먼저 분리 실행하면 실패 시 새 웹 컨테이너로 교체하지 않고 배포를 중단할 수 있습니다.
@@ -86,8 +90,10 @@ docker compose -f compose.ec2.yml logs -f web
 ```bash
 git pull
 docker compose -f compose.ec2.yml build
+docker compose -f compose.ec2.yml --profile ops run --rm db-backup
+docker compose -f compose.ec2.yml up -d --no-build redis
 docker compose -f compose.ec2.yml run --rm migrate
-docker compose -f compose.ec2.yml up -d --no-build --no-deps web
+docker compose -f compose.ec2.yml up -d --no-build --no-deps web worker
 ```
 
 ## 무료 AI 회의록

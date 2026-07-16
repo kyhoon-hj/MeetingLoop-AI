@@ -1,4 +1,18 @@
 services:
+  redis:
+    image: redis:7.4-alpine
+    restart: unless-stopped
+    command: ["redis-server", "--appendonly", "yes", "--maxmemory-policy", "noeviction"]
+    volumes:
+      - redis-data:/data
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
   migrate:
     build:
       context: .
@@ -15,6 +29,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+      target: runner
     image: meetingloop-ai:latest
     restart: unless-stopped
     init: true
@@ -25,6 +40,11 @@ services:
     depends_on:
       migrate:
         condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    environment:
+      ANALYSIS_QUEUE_MODE: redis
+      REDIS_URL: redis://redis:6379/0
     ports:
       - "127.0.0.1:3101:3000"
     security_opt:
@@ -39,3 +59,59 @@ services:
       timeout: 5s
       start_period: 20s
       retries: 3
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: worker-runner
+    image: meetingloop-ai-worker:latest
+    restart: unless-stopped
+    init: true
+    env_file:
+      - ${ENV_FILE:-.env.docker}
+    environment:
+      ANALYSIS_QUEUE_MODE: redis
+      REDIS_URL: redis://redis:6379/0
+      WORKER_HEALTH_PORT: 3001
+      RETENTION_SWEEP_ENABLED: ${RETENTION_SWEEP_ENABLED:-false}
+      RETENTION_SWEEP_INTERVAL_MS: ${RETENTION_SWEEP_INTERVAL_MS:-3600000}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "node", "-e", "fetch('http://127.0.0.1:3001/health/ready').then(r=>{if(!r.ok)process.exit(1)}).catch(()=>process.exit(1))"]
+      interval: 20s
+      timeout: 5s
+      start_period: 20s
+      retries: 3
+
+  db-backup:
+    profiles: ["ops"]
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: db-ops
+      args:
+        POSTGRES_OPS_VERSION: ${POSTGRES_OPS_VERSION:-16}
+    image: meetingloop-ai-db-ops:latest
+    env_file:
+      - ${ENV_FILE:-.env.docker}
+    environment:
+      BACKUP_DIR: /backups
+      BACKUP_RETENTION_DAYS: ${BACKUP_RETENTION_DAYS:-35}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - ./backups:/backups
+    security_opt:
+      - no-new-privileges:true
+
+volumes:
+  redis-data:

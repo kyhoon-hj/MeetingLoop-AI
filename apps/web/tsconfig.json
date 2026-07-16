@@ -26,6 +26,9 @@
       "path": "../../packages/domain"
     },
     {
+      "path": "../../packages/queue"
+    },
+    {
       "path": "../../packages/storage"
     },
     {

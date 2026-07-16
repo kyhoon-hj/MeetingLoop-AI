@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { confirmedTextProviderCapability, type ProviderCapability } from "./provider-capabilities";
+
+export * from "./deterministic";
+export * from "./provider-capabilities";
 
 export const transcriptSegmentResultSchema = z.object({
   sequence: z.number().int().nonnegative(),
@@ -59,6 +63,7 @@ export interface GeneratedMinutesDraft {
 }
 
 export interface MinutesProvider {
+  readonly capability: ProviderCapability;
   generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft>;
 }
 
@@ -239,6 +244,8 @@ export class MockMeetingAnalysisProvider implements MeetingAnalysisProvider {
 }
 
 export class MockMinutesProvider implements MinutesProvider {
+  readonly capability = confirmedTextProviderCapability("mock-minutes", "demo");
+
   async generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft> {
     const confirmedText = input.transcript.map((segment) => `${segment.speakerLabel}: ${segment.editedText}`).join("\n");
     const firstSegment = input.transcript[0];
@@ -282,6 +289,7 @@ interface OllamaMinutesProviderOptions {
 export class OllamaMinutesProvider implements MinutesProvider {
   readonly kind = "ollama" as const;
   readonly model: string;
+  readonly capability = confirmedTextProviderCapability("ollama-minutes", "real");
   private readonly baseUrl: string;
   private readonly request: typeof fetch;
   private readonly timeoutMs: number;
@@ -351,6 +359,7 @@ interface GeminiMinutesProviderOptions {
 export class GeminiMinutesProvider implements MinutesProvider {
   readonly kind = "gemini" as const;
   readonly model: string;
+  readonly capability = confirmedTextProviderCapability("gemini-minutes", "real", { externalTransmission: true });
   private readonly apiKey: string;
   private readonly request: typeof fetch;
   private readonly timeoutMs: number;

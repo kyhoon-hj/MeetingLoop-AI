@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { TranscriptVersionConflictError, getTranscript, saveTranscript } from "@meetingloop/db";
 import { saveTranscriptInputSchema } from "@meetingloop/domain";
 import { databaseErrorResponse } from "../../../../api-errors";
+import { assertRequestScope, readIdempotencyKey } from "../../../../api-request";
 import { getSessionPayload } from "../../../../session";
 import { logUnexpectedServerError } from "../../../../server-error";
 import { readLimitedJson, TranscriptRequestError, transcriptValidationCode } from "../../../../transcript-api";
@@ -37,6 +38,8 @@ export async function PUT(request: Request, context: RouteContext) {
   const { meetingId } = await context.params;
   try {
     const body = await readLimitedJson(request);
+    assertRequestScope(body, { organizationId: session.organizationId, meetingId });
+    const idempotencyKey = readIdempotencyKey(request);
     const parsed = saveTranscriptInputSchema.safeParse({
       ...(typeof body === "object" && body !== null ? body : {}),
       organizationId: session.organizationId,
@@ -45,7 +48,7 @@ export async function PUT(request: Request, context: RouteContext) {
     if (!parsed.success) {
       return NextResponse.json({ error: transcriptValidationCode(parsed.error) }, { status: 400 });
     }
-    const transcript = await saveTranscript(session.userId, parsed.data);
+    const transcript = await saveTranscript(session.userId, parsed.data, { idempotencyKey });
     return NextResponse.json({ status: "SAVED", transcript });
   } catch (error) {
     if (error instanceof TranscriptRequestError) {

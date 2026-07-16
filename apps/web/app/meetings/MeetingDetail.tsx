@@ -1,6 +1,7 @@
 import Link from "next/link";
 import type { MeetingDetailRecord } from "@meetingloop/db";
 import RevisionHistory from "./RevisionHistory";
+import DeleteMeetingButton from "./DeleteMeetingButton";
 
 function formatDate(value: string): string {
   return new Intl.DateTimeFormat("ko-KR", { dateStyle: "long", timeStyle: "short", timeZone: "Asia/Seoul" })
@@ -12,7 +13,7 @@ function formatTimecode(milliseconds: number): string {
   return `${Math.floor(seconds / 60).toString().padStart(2, "0")}:${(seconds % 60).toString().padStart(2, "0")}`;
 }
 
-export default function MeetingDetail({ detail }: { detail: MeetingDetailRecord }) {
+export default function MeetingDetail({ detail, canDelete }: { detail: MeetingDetailRecord; canDelete: boolean }) {
   const editUrl = `/?meetingId=${encodeURIComponent(detail.meeting.id)}`;
   const minutesEditUrl = `${editUrl}&view=minutes`;
   return (
@@ -89,6 +90,13 @@ export default function MeetingDetail({ detail }: { detail: MeetingDetailRecord 
       </section>
 
       <RevisionHistory revisions={detail.revisions} />
+      {canDelete ? (
+        <section className="detail-section danger-zone" aria-labelledby="meeting-delete-heading">
+          <h2 id="meeting-delete-heading">회의 삭제</h2>
+          <p className="muted">삭제 요청 즉시 모든 사용자 화면에서 숨겨지며, 조직 보존기간이 먼저 만료되지 않으면 30일 뒤 영구 삭제됩니다.</p>
+          <DeleteMeetingButton organizationId={detail.meeting.organizationId} meetingId={detail.meeting.id} />
+        </section>
+      ) : null}
     </div>
   );
 }

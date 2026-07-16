@@ -2,6 +2,7 @@ import { NextResponse } from "next/server";
 import { getTranscriptRevisions } from "@meetingloop/db";
 import { databaseErrorResponse } from "../../../../../api-errors";
 import { getSessionPayload } from "../../../../../session";
+import { logUnexpectedServerError } from "../../../../../server-error";
 
 interface RouteContext {
   params: Promise<{ meetingId: string }>;
@@ -15,6 +16,9 @@ export async function GET(_request: Request, context: RouteContext) {
     const revisions = await getTranscriptRevisions(session.userId, session.organizationId, meetingId);
     return NextResponse.json({ revisions }, { headers: { "Cache-Control": "no-store" } });
   } catch (error) {
-    return databaseErrorResponse(error) ?? NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
+    const response = databaseErrorResponse(error);
+    if (response) return response;
+    logUnexpectedServerError("transcript.revisions.get", error);
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

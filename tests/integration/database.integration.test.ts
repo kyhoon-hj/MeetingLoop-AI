@@ -21,9 +21,11 @@ databaseSuite("PostgreSQL integration", () => {
          AND column_name = 'raw_text'`
     );
     const contentConstraints = await pool!.query<{ definition: string }>(
-      `SELECT pg_get_constraintdef(oid) AS definition
-       FROM pg_constraint
-       WHERE conname IN ('transcript_segments_status_check', 'meeting_minutes_status_check')
+      `SELECT pg_get_constraintdef(constraints.oid) AS definition
+       FROM pg_constraint constraints
+       JOIN pg_namespace namespaces ON namespaces.oid = constraints.connamespace
+       WHERE namespaces.nspname = 'public'
+         AND constraints.conname IN ('transcript_segments_status_check', 'meeting_minutes_status_check')
        ORDER BY conname`
     );
 

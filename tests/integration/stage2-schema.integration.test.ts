@@ -38,9 +38,30 @@ databaseSuite("stage 2 persistence schema", () => {
       "transcripts"
     ]);
     expect(transcriptColumns.rows.map((row) => row.column_name)).toContain("transcript_id");
-    expect(transcriptColumns.rows.map((row) => row.column_name)).not.toContain("meeting_id");
-    expect(transcriptColumns.rows.map((row) => row.column_name)).not.toContain("organization_id");
+    expect(transcriptColumns.rows.map((row) => row.column_name)).toContain("meeting_id");
+    expect(transcriptColumns.rows.map((row) => row.column_name)).toContain("organization_id");
     expect(minutesColumns.rows.map((row) => row.column_name)).toEqual(["updated_by", "version"]);
+  });
+
+  it("provides consent audit and deletion scheduling structures", async () => {
+    const tables = await pool!.query<{ table_name: string }>(
+      `SELECT table_name FROM information_schema.tables
+       WHERE table_schema = 'public'
+         AND table_name IN ('privacy_audit_events', 'external_ai_consents', 'meeting_deletion_requests')
+       ORDER BY table_name`
+    );
+    const meetingColumns = await pool!.query<{ column_name: string }>(
+      `SELECT column_name FROM information_schema.columns
+       WHERE table_schema = 'public' AND table_name = 'meetings'
+         AND column_name IN ('recording_consent_by', 'recording_consent_version')
+       ORDER BY column_name`
+    );
+    expect(tables.rows.map((row) => row.table_name)).toEqual([
+      "external_ai_consents", "meeting_deletion_requests", "privacy_audit_events"
+    ]);
+    expect(meetingColumns.rows.map((row) => row.column_name)).toEqual([
+      "recording_consent_by", "recording_consent_version"
+    ]);
   });
 
   it("uses local-only recording metadata", async () => {
@@ -93,7 +114,7 @@ databaseSuite("stage 2 persistence schema", () => {
            'memberships_organization_id_fkey',
            'meetings_organization_id_fkey',
            'participants_user_id_fkey',
-           'transcript_segments_transcript_id_fkey',
+           'transcript_segments_organization_transcript_id_fkey',
            'meeting_minutes_organization_meeting_id_fkey'
          )`
     );
@@ -102,7 +123,7 @@ databaseSuite("stage 2 persistence schema", () => {
     expect(byName.get("memberships_organization_id_fkey")).toBe("CASCADE");
     expect(byName.get("meetings_organization_id_fkey")).toBe("CASCADE");
     expect(byName.get("participants_user_id_fkey")).toBe("SET NULL");
-    expect(byName.get("transcript_segments_transcript_id_fkey")).toBe("CASCADE");
+    expect(byName.get("transcript_segments_organization_transcript_id_fkey")).toBe("CASCADE");
     expect(byName.get("meeting_minutes_organization_meeting_id_fkey")).toBe("CASCADE");
   });
 

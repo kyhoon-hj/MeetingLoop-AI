@@ -3,6 +3,7 @@ import { hashPassword, verifyPassword } from "@meetingloop/auth";
 import type { Pool, PoolClient } from "pg";
 import {
   assertMeetingEditorRole,
+  assertMeetingDeletionRole,
   assertMinutesConfirmerRole,
   assertMinutesEditorRole,
   assertProjectManagerRole,
@@ -16,6 +17,10 @@ import {
   saveMinutesInputSchema,
   saveTranscriptInputSchema,
   saveTranscriptSegmentsInputSchema,
+  meetingMinutesSchema,
+  meetingDeletionInputSchema,
+  privacyPolicyVersion,
+  transcriptDocumentSchema,
   updateProjectInputSchema,
   type Agenda,
   type ArchiveProjectInput,
@@ -23,6 +28,7 @@ import {
   type CreateProjectInput,
   type GenerateMinutesInput,
   type Meeting,
+  type MeetingDeletionInput,
   type MeetingMinutes,
   type MinutesRevision,
   type Membership,
@@ -44,6 +50,10 @@ import {
 } from "@meetingloop/domain";
 import { getDatabasePool } from "./pool";
 import { withTransaction } from "./transaction";
+import {
+  executeIdempotentMutation,
+  type ContentMutationOptions
+} from "./mutation-receipts";
 
 export type HealthStatus = "ok" | "degraded";
 
@@ -97,8 +107,35 @@ export async function checkDatabaseHealth(
   }
 }
 
+export const requiredSchemaMigration = "0007_privacy_retention_operations.sql";
+
+export async function checkRequiredSchemaMigration(
+  filename = requiredSchemaMigration
+): Promise<{ status: "ok" | "missing" | "unavailable"; filename: string }> {
+  try {
+    const result = await getDatabasePool().query(
+      "SELECT 1 FROM schema_migrations WHERE filename = $1",
+      [filename]
+    );
+    return { status: result.rowCount === 1 ? "ok" : "missing", filename };
+  } catch {
+    return { status: "unavailable", filename };
+  }
+}
+
+export async function assertRequiredSchemaMigration(filename = requiredSchemaMigration): Promise<void> {
+  const status = await checkRequiredSchemaMigration(filename);
+  if (status.status !== "ok") throw new Error(status.status === "missing" ? "DATABASE_SCHEMA_OUTDATED" : "DATABASE_UNAVAILABLE");
+}
+
 export { closeDatabasePool, createDatabasePool, getDatabasePool, getDatabasePoolConfig } from "./pool";
 export { withTransaction } from "./transaction";
+export {
+  MutationIdempotencyConflictError,
+  MutationInProgressError,
+  type ContentMutationOperation,
+  type ContentMutationOptions
+} from "./mutation-receipts";
 
 export interface Session {
   user: User;
@@ -188,6 +225,21 @@ export interface MeetingDetailRecord {
   revisions: MeetingRevisionSummary[];
 }
 
+export interface MeetingDeletionReceipt {
+  requestId: string;
+  organizationId: string;
+  meetingId: string;
+  reason: "USER_REQUEST" | "RETENTION_EXPIRED";
+  requestedAt: string;
+  purgeAfter: string;
+}
+
+export interface RetentionSweepResult {
+  scheduled: number;
+  purged: number;
+  purgedMeetingIds: string[];
+}
+
 type Row = Record<string, unknown>;
 
 function iso(value: unknown): string {
@@ -246,6 +298,8 @@ function mapMeeting(row: Row): Meeting {
     meetingType: String(row.meeting_type) as Meeting["meetingType"], status: String(row.status) as Meeting["status"],
     startedAt: iso(row.started_at), endedAt: nullableIso(row.ended_at), timezone: String(row.timezone),
     sourceType: String(row.source_type) as Meeting["sourceType"], recordingConsentAt: nullableIso(row.recording_consent_at),
+    recordingConsentBy: row.recording_consent_by == null ? null : String(row.recording_consent_by),
+    recordingConsentVersion: row.recording_consent_version == null ? null : String(row.recording_consent_version),
     createdBy: String(row.created_by), approvedBy: row.approved_by == null ? null : String(row.approved_by),
     approvedAt: nullableIso(row.approved_at), createdAt: iso(row.created_at), updatedAt: iso(row.updated_at)
   };
@@ -743,9 +797,18 @@ export async function createMeeting(userId: string, input: CreateMeetingInput): 
     const meetingId = `meeting-${randomUUID()}`;
     const meetingResult = await client.query(
       `INSERT INTO meetings (id, organization_id, project_id, title, title_status, meeting_type, status,
-        started_at, ended_at, timezone, source_type, recording_consent_at, created_by, created_at, updated_at)
-       VALUES ($1, $2, $3, $4, 'CONFIRMED', $5, 'REVIEW', $6, NULL, 'Asia/Seoul', 'BROWSER_RECORDING', $6, $7, $6, $6)
-       RETURNING *`, [meetingId, parsed.organizationId, parsed.projectId, parsed.title, parsed.meetingType, now, userId]
+        started_at, ended_at, timezone, source_type, recording_consent_at, recording_consent_by,
+        recording_consent_version, created_by, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, 'CONFIRMED', $5, 'REVIEW', $6, NULL, 'Asia/Seoul', 'BROWSER_RECORDING',
+        $6, $7, $8, $7, $6, $6)
+       RETURNING *`, [meetingId, parsed.organizationId, parsed.projectId, parsed.title, parsed.meetingType, now, userId, privacyPolicyVersion]
+    );
+    await client.query(
+      `INSERT INTO privacy_audit_events (
+         id, organization_id, meeting_id, actor_id, event_type, policy_version, metadata, created_at
+       ) VALUES ($1, $2, $3, $4, 'RECORDING_CONSENT_RECORDED', $5, $6::jsonb, $7)`,
+      [`privacy-audit-${randomUUID()}`, parsed.organizationId, meetingId, userId, privacyPolicyVersion,
+        JSON.stringify({ source: "MEETING_CREATE", audioStorage: "BROWSER_ONLY" }), now]
     );
     const participants: Participant[] = [];
     for (const participant of parsed.participants) {
@@ -798,12 +861,223 @@ export async function ensureQuickCaptureMeeting(userId: string, organizationId: 
     const now = new Date().toISOString();
     const result = await client.query(
       `INSERT INTO meetings (id, organization_id, project_id, title, title_status, meeting_type, status,
-        started_at, timezone, source_type, recording_consent_at, created_by, created_at, updated_at)
+        started_at, timezone, source_type, recording_consent_at, recording_consent_by,
+        recording_consent_version, created_by, created_at, updated_at)
        VALUES ($1, $2, $3, '빠른 녹음 회의록', 'CONFIRMED', 'GENERAL', 'REVIEW', $4, 'Asia/Seoul',
-        'BROWSER_RECORDING', $4, $5, $4, $4) RETURNING *`,
+        'BROWSER_RECORDING', NULL, NULL, NULL, $5, $4, $4) RETURNING *`,
       [`meeting-${randomUUID()}`, organizationId, projectId, now, userId]
     );
     return mapMeeting(result.rows[0] as Row);
+  });
+}
+
+function assertAuditIdempotencyKey(value: string): void {
+  if (value.length < 8 || value.length > 160 || !/^[A-Za-z0-9._:-]+$/.test(value)) {
+    throw new Error("IDEMPOTENCY_KEY_INVALID");
+  }
+}
+
+export async function recordRecordingConsent(
+  userId: string,
+  input: { organizationId: string; meetingId: string; idempotencyKey: string; confirmedAt: string }
+): Promise<Meeting> {
+  assertAuditIdempotencyKey(input.idempotencyKey);
+  const confirmedAt = new Date(input.confirmedAt);
+  if (Number.isNaN(confirmedAt.getTime()) || confirmedAt.getTime() > Date.now() + 300_000
+    || confirmedAt.getTime() < Date.now() - 30 * 86_400_000) throw new Error("CONSENT_TIMESTAMP_INVALID");
+  return withTransaction(async (client) => {
+    const membership = await requireActiveMembership(client, userId, input.organizationId);
+    assertMeetingEditorRole(membership.role);
+    const result = await client.query(
+      `UPDATE meetings
+       SET recording_consent_at = coalesce(recording_consent_at, $5::timestamptz),
+           recording_consent_by = coalesce(recording_consent_by, $3),
+           recording_consent_version = coalesce(recording_consent_version, $4),
+           updated_at = now()
+       WHERE id = $1 AND organization_id = $2 AND status <> 'ARCHIVED'
+       RETURNING *`,
+      [input.meetingId, input.organizationId, userId, privacyPolicyVersion, confirmedAt.toISOString()]
+    );
+    if (!result.rows[0]) throw new Error("MEETING_NOT_FOUND");
+    await client.query(
+      `INSERT INTO privacy_audit_events (
+         id, organization_id, meeting_id, actor_id, event_type, policy_version, idempotency_key, metadata, created_at
+       ) VALUES ($1, $2, $3, $4, 'RECORDING_CONSENT_RECORDED', $5, $6, $7::jsonb, $8::timestamptz)
+       ON CONFLICT (organization_id, actor_id, event_type, idempotency_key)
+       WHERE actor_id is not null and idempotency_key is not null DO NOTHING`,
+      [`privacy-audit-${randomUUID()}`, input.organizationId, input.meetingId, userId,
+        privacyPolicyVersion, input.idempotencyKey, JSON.stringify({ source: "RECORDING_START", audioStorage: "BROWSER_ONLY" }),
+        confirmedAt.toISOString()]
+    );
+    return mapMeeting(result.rows[0] as Row);
+  });
+}
+
+export async function recordExternalAiConsent(
+  userId: string,
+  input: { organizationId: string; meetingId: string; provider: "gemini"; idempotencyKey: string }
+): Promise<{ provider: "gemini"; policyVersion: string; consentedAt: string }> {
+  assertAuditIdempotencyKey(input.idempotencyKey);
+  return withTransaction(async (client) => {
+    const membership = await requireActiveMembership(client, userId, input.organizationId);
+    assertMinutesEditorRole(membership.role);
+    const meeting = await client.query(
+      `SELECT id FROM meetings WHERE id = $1 AND organization_id = $2 AND status <> 'ARCHIVED'`,
+      [input.meetingId, input.organizationId]
+    );
+    if (!meeting.rows[0]) throw new Error("MEETING_NOT_FOUND");
+    const consent = await client.query(
+      `INSERT INTO external_ai_consents (
+         id, organization_id, meeting_id, actor_id, provider, data_scope, policy_version, consented_at
+       ) VALUES ($1, $2, $3, $4, 'gemini', 'CONFIRMED_TRANSCRIPT', $5, now())
+       ON CONFLICT (organization_id, meeting_id, actor_id, provider, policy_version)
+       DO UPDATE SET consented_at = external_ai_consents.consented_at
+       RETURNING consented_at`,
+      [`external-ai-consent-${randomUUID()}`, input.organizationId, input.meetingId, userId, privacyPolicyVersion]
+    );
+    await client.query(
+      `INSERT INTO privacy_audit_events (
+         id, organization_id, meeting_id, actor_id, event_type, policy_version, idempotency_key, metadata
+       ) VALUES ($1, $2, $3, $4, 'EXTERNAL_AI_CONSENT_RECORDED', $5, $6, $7::jsonb)
+       ON CONFLICT (organization_id, actor_id, event_type, idempotency_key)
+       WHERE actor_id is not null and idempotency_key is not null DO NOTHING`,
+      [`privacy-audit-${randomUUID()}`, input.organizationId, input.meetingId, userId,
+        privacyPolicyVersion, input.idempotencyKey,
+        JSON.stringify({ provider: "gemini", dataScope: "CONFIRMED_TRANSCRIPT", originalAudio: false })]
+    );
+    return { provider: "gemini", policyVersion: privacyPolicyVersion, consentedAt: iso((consent.rows[0] as Row).consented_at) };
+  });
+}
+
+export async function assertExternalAiConsent(
+  userId: string,
+  organizationId: string,
+  meetingId: string,
+  provider: "gemini"
+): Promise<void> {
+  const pool = getDatabasePool();
+  const membership = await requireActiveMembership(pool, userId, organizationId);
+  assertMinutesEditorRole(membership.role);
+  const result = await pool.query(
+    `SELECT 1 FROM external_ai_consents
+     WHERE organization_id = $1 AND meeting_id = $2 AND actor_id = $3
+       AND provider = $4 AND policy_version = $5`,
+    [organizationId, meetingId, userId, provider, privacyPolicyVersion]
+  );
+  if (result.rowCount !== 1) throw new Error("EXTERNAL_AI_CONSENT_REQUIRED");
+}
+
+export async function requestMeetingDeletion(userId: string, input: MeetingDeletionInput): Promise<MeetingDeletionReceipt> {
+  const parsed = meetingDeletionInputSchema.parse(input);
+  return withTransaction(async (client) => {
+    const membership = await requireActiveMembership(client, userId, parsed.organizationId);
+    assertMeetingDeletionRole(membership.role);
+    const meeting = await client.query(
+      `SELECT id, status FROM meetings WHERE id = $1 AND organization_id = $2 FOR UPDATE`,
+      [parsed.meetingId, parsed.organizationId]
+    );
+    if (!meeting.rows[0]) throw new Error("MEETING_NOT_FOUND");
+    const existing = await client.query(
+      `SELECT * FROM meeting_deletion_requests WHERE organization_id = $1 AND meeting_id = $2`,
+      [parsed.organizationId, parsed.meetingId]
+    );
+    if (existing.rows[0]) {
+      const row = existing.rows[0] as Row;
+      return {
+        requestId: String(row.id), organizationId: String(row.organization_id), meetingId: String(row.meeting_id),
+        reason: String(row.reason) as MeetingDeletionReceipt["reason"], requestedAt: iso(row.requested_at), purgeAfter: iso(row.purge_after)
+      };
+    }
+    if (String((meeting.rows[0] as Row).status) === "ARCHIVED") throw new Error("MEETING_NOT_FOUND");
+    const requestedAt = new Date();
+    const purgeAfter = new Date(requestedAt.getTime() + 30 * 86_400_000);
+    const requestId = `meeting-deletion-${randomUUID()}`;
+    await client.query(
+      `INSERT INTO meeting_deletion_requests (
+         id, organization_id, meeting_id, requested_by, reason, requested_at, purge_after
+       ) VALUES ($1, $2, $3, $4, 'USER_REQUEST', $5, $6)`,
+      [requestId, parsed.organizationId, parsed.meetingId, userId, requestedAt.toISOString(), purgeAfter.toISOString()]
+    );
+    await client.query(
+      `UPDATE meetings SET status = 'ARCHIVED', updated_at = $3 WHERE id = $1 AND organization_id = $2`,
+      [parsed.meetingId, parsed.organizationId, requestedAt.toISOString()]
+    );
+    await client.query(
+      `INSERT INTO privacy_audit_events (
+         id, organization_id, meeting_id, actor_id, event_type, policy_version, idempotency_key, metadata, created_at
+       ) VALUES ($1, $2, $3, $4, 'MEETING_DELETION_REQUESTED', $5, $6, $7::jsonb, $8)
+       ON CONFLICT (organization_id, actor_id, event_type, idempotency_key)
+       WHERE actor_id is not null and idempotency_key is not null DO NOTHING`,
+      [`privacy-audit-${randomUUID()}`, parsed.organizationId, parsed.meetingId, userId, privacyPolicyVersion,
+        parsed.idempotencyKey, JSON.stringify({ reason: "USER_REQUEST", recoveryDays: 30 }), requestedAt.toISOString()]
+    );
+    return {
+      requestId, organizationId: parsed.organizationId, meetingId: parsed.meetingId,
+      reason: "USER_REQUEST", requestedAt: requestedAt.toISOString(), purgeAfter: purgeAfter.toISOString()
+    };
+  });
+}
+
+export async function runRetentionSweep(now = new Date(), batchSize = 100): Promise<RetentionSweepResult> {
+  if (!Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1_000) throw new Error("RETENTION_BATCH_INVALID");
+  const timestamp = now.toISOString();
+  return withTransaction(async (client) => {
+    const scheduled = await client.query(
+      `WITH candidates AS (
+         SELECT meetings.organization_id, meetings.id AS meeting_id
+         FROM meetings
+         JOIN organizations ON organizations.id = meetings.organization_id
+         LEFT JOIN meeting_deletion_requests requests
+           ON requests.organization_id = meetings.organization_id AND requests.meeting_id = meetings.id
+         WHERE requests.id IS NULL
+           AND coalesce(meetings.ended_at, meetings.created_at)
+             + organizations.retention_days * interval '1 day' <= $1::timestamptz
+         ORDER BY coalesce(meetings.ended_at, meetings.created_at), meetings.id
+         FOR UPDATE OF meetings SKIP LOCKED
+         LIMIT $2
+       )
+       INSERT INTO meeting_deletion_requests (
+         id, organization_id, meeting_id, requested_by, reason, requested_at, purge_after
+       )
+       SELECT 'meeting-deletion-' || gen_random_uuid()::text, organization_id, meeting_id,
+              NULL, 'RETENTION_EXPIRED', $1::timestamptz, $1::timestamptz
+       FROM candidates
+       ON CONFLICT (organization_id, meeting_id) DO NOTHING
+       RETURNING organization_id, meeting_id`,
+      [timestamp, batchSize]
+    );
+    for (const raw of scheduled.rows as Row[]) {
+      await client.query(
+        `INSERT INTO privacy_audit_events (
+           id, organization_id, meeting_id, actor_id, event_type, policy_version, metadata, created_at
+         ) VALUES ($1, $2, $3, NULL, 'RETENTION_DELETION_SCHEDULED', $4, $5::jsonb, $6)`,
+        [`privacy-audit-${randomUUID()}`, String(raw.organization_id), String(raw.meeting_id), privacyPolicyVersion,
+          JSON.stringify({ reason: "RETENTION_EXPIRED" }), timestamp]
+      );
+    }
+    const due = await client.query(
+      `SELECT organization_id, meeting_id, reason
+       FROM meeting_deletion_requests
+       WHERE purge_after <= $1::timestamptz
+       ORDER BY purge_after, meeting_id
+       FOR UPDATE SKIP LOCKED
+       LIMIT $2`,
+      [timestamp, batchSize]
+    );
+    const purgedMeetingIds: string[] = [];
+    for (const raw of due.rows as Row[]) {
+      const meetingId = String(raw.meeting_id);
+      await client.query(
+        `INSERT INTO privacy_audit_events (
+           id, organization_id, meeting_id, actor_id, event_type, policy_version, metadata, created_at
+         ) VALUES ($1, $2, $3, NULL, 'MEETING_PURGED', $4, $5::jsonb, $6)`,
+        [`privacy-audit-${randomUUID()}`, String(raw.organization_id), meetingId, privacyPolicyVersion,
+          JSON.stringify({ reason: String(raw.reason) }), timestamp]
+      );
+      const deleted = await client.query(`DELETE FROM meetings WHERE id = $1`, [meetingId]);
+      if (deleted.rowCount === 1) purgedMeetingIds.push(meetingId);
+    }
+    return { scheduled: scheduled.rowCount ?? 0, purged: purgedMeetingIds.length, purgedMeetingIds };
   });
 }
 
@@ -823,8 +1097,10 @@ async function loadTranscriptDocument(
   meetingId: string
 ): Promise<TranscriptDocument> {
   const header = await client.query(
-    `SELECT * FROM transcripts
-     WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
+    `SELECT transcripts.* FROM transcripts
+     JOIN meetings ON meetings.id = transcripts.meeting_id AND meetings.organization_id = transcripts.organization_id
+     WHERE transcripts.organization_id = $1 AND transcripts.meeting_id = $2
+       AND transcripts.status = 'CONFIRMED' AND meetings.status <> 'ARCHIVED'`,
     [organizationId, meetingId]
   );
   const row = header.rows[0] as Row | undefined;
@@ -856,7 +1132,22 @@ export async function getTranscript(userId: string, organizationId: string, meet
   return loadTranscriptDocument(pool, organizationId, meetingId);
 }
 
-export async function saveTranscript(userId: string, input: SaveTranscriptInput): Promise<TranscriptDocument> {
+export async function getTranscriptForMinutesGeneration(
+  userId: string,
+  organizationId: string,
+  meetingId: string
+): Promise<TranscriptDocument> {
+  const pool = getDatabasePool();
+  const membership = await requireActiveMembership(pool, userId, organizationId);
+  assertMinutesEditorRole(membership.role);
+  return loadTranscriptDocument(pool, organizationId, meetingId);
+}
+
+export async function saveTranscript(
+  userId: string,
+  input: SaveTranscriptInput,
+  options: ContentMutationOptions = {}
+): Promise<TranscriptDocument> {
   const parsed = saveTranscriptInputSchema.parse(input);
   return withTransaction(async (client) => {
     const membership = await requireActiveMembership(client, userId, parsed.organizationId);
@@ -866,7 +1157,17 @@ export async function saveTranscript(userId: string, input: SaveTranscriptInput)
       [parsed.meetingId, parsed.organizationId]
     );
     if (!meeting.rows[0]) throw new Error("MEETING_NOT_FOUND");
-    const currentResult = await client.query(
+    return executeIdempotentMutation({
+      client,
+      organizationId: parsed.organizationId,
+      meetingId: parsed.meetingId,
+      actorId: userId,
+      operation: "SAVE_TRANSCRIPT",
+      idempotencyKey: options.idempotencyKey,
+      request: parsed,
+      parseCached: (value) => transcriptDocumentSchema.parse(value),
+      mutate: async () => {
+        const currentResult = await client.query(
       `SELECT * FROM transcripts WHERE organization_id = $1 AND meeting_id = $2 FOR UPDATE`,
       [parsed.organizationId, parsed.meetingId]
     );
@@ -890,9 +1191,11 @@ export async function saveTranscript(userId: string, input: SaveTranscriptInput)
       transcriptId = String(current.id);
       const previous = await loadTranscriptDocument(client, parsed.organizationId, parsed.meetingId);
       await client.query(
-        `INSERT INTO transcript_revisions (id, transcript_id, version, snapshot, changed_by, created_at)
-         VALUES ($1, $2, $3, $4::jsonb, $5, now())`,
-        [`transcript-revision-${randomUUID()}`, transcriptId, currentVersion, JSON.stringify({
+        `INSERT INTO transcript_revisions (
+           id, organization_id, meeting_id, transcript_id, version, snapshot, changed_by, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())`,
+        [`transcript-revision-${randomUUID()}`, parsed.organizationId, parsed.meetingId,
+          transcriptId, currentVersion, JSON.stringify({
           version: previous.version,
           confirmedBy: previous.confirmedBy,
           confirmedAt: previous.confirmedAt,
@@ -910,16 +1213,20 @@ export async function saveTranscript(userId: string, input: SaveTranscriptInput)
 
     for (const segment of parsed.segments) {
       await client.query(
-        `INSERT INTO transcript_segments (id, transcript_id, sequence, speaker_label, start_ms, end_ms,
-          edited_text, source, status, edited_by, created_at, updated_at)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'CONFIRMED', $9, now(), now())`,
-        [`segment-${randomUUID()}`, transcriptId, segment.sequence, segment.speakerLabel,
-          segment.startMs, segment.endMs, segment.editedText, segment.source, userId]
+        `INSERT INTO transcript_segments (
+           id, organization_id, meeting_id, transcript_id, sequence, speaker_label, start_ms, end_ms,
+           edited_text, source, status, edited_by, created_at, updated_at
+         ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'CONFIRMED', $11, now(), now())`,
+        [`segment-${randomUUID()}`, parsed.organizationId, parsed.meetingId, transcriptId,
+          segment.sequence, segment.speakerLabel, segment.startMs, segment.endMs,
+          segment.editedText, segment.source, userId]
       );
     }
     const saved = await loadTranscriptDocument(client, parsed.organizationId, parsed.meetingId);
     if (saved.version !== nextVersion) throw new Error("TRANSCRIPT_SAVE_FAILED");
     return saved;
+      }
+    });
   });
 }
 
@@ -930,14 +1237,10 @@ export async function getTranscriptRevisions(
 ): Promise<TranscriptRevision[]> {
   const pool = getDatabasePool();
   await requireActiveMembership(pool, userId, organizationId);
-  const transcript = await pool.query(
-    `SELECT id FROM transcripts WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
-    [organizationId, meetingId]
-  );
-  if (!transcript.rows[0]) throw new Error("TRANSCRIPT_NOT_FOUND");
+  const activeTranscript = await loadTranscriptDocument(pool, organizationId, meetingId);
   const result = await pool.query(
     `SELECT * FROM transcript_revisions WHERE transcript_id = $1 ORDER BY version DESC`,
-    [(transcript.rows[0] as Row).id]
+    [activeTranscript.id]
   );
   return result.rows.map((raw) => {
     const row = raw as Row;
@@ -1026,8 +1329,10 @@ async function loadMinutesDocument(
   meetingId: string
 ): Promise<MeetingMinutes> {
   const result = await client.query(
-    `SELECT * FROM meeting_minutes
-     WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
+    `SELECT meeting_minutes.* FROM meeting_minutes
+     JOIN meetings ON meetings.id = meeting_minutes.meeting_id AND meetings.organization_id = meeting_minutes.organization_id
+     WHERE meeting_minutes.organization_id = $1 AND meeting_minutes.meeting_id = $2
+       AND meeting_minutes.status = 'CONFIRMED' AND meetings.status <> 'ARCHIVED'`,
     [organizationId, meetingId]
   );
   if (!result.rows[0]) throw new Error("MINUTES_NOT_FOUND");
@@ -1040,7 +1345,11 @@ export async function getMinutes(userId: string, organizationId: string, meeting
   return loadMinutesDocument(pool, organizationId, meetingId);
 }
 
-export async function saveMinutes(userId: string, input: SaveMinutesInput): Promise<MeetingMinutes> {
+export async function saveMinutes(
+  userId: string,
+  input: SaveMinutesInput,
+  options: ContentMutationOptions = {}
+): Promise<MeetingMinutes> {
   const parsed = saveMinutesInputSchema.parse(input);
   return withTransaction(async (client) => {
     const membership = await requireActiveMembership(client, userId, parsed.organizationId);
@@ -1055,8 +1364,17 @@ export async function saveMinutes(userId: string, input: SaveMinutesInput): Prom
       [parsed.organizationId, parsed.meetingId]
     );
     if (!transcript.rows[0]) throw new Error("TRANSCRIPT_REQUIRED");
-
-    const currentResult = await client.query(
+    return executeIdempotentMutation({
+      client,
+      organizationId: parsed.organizationId,
+      meetingId: parsed.meetingId,
+      actorId: userId,
+      operation: "SAVE_MINUTES",
+      idempotencyKey: options.idempotencyKey,
+      request: parsed,
+      parseCached: (value) => meetingMinutesSchema.parse(value),
+      mutate: async () => {
+        const currentResult = await client.query(
       `SELECT * FROM meeting_minutes WHERE organization_id = $1 AND meeting_id = $2 FOR UPDATE`,
       [parsed.organizationId, parsed.meetingId]
     );
@@ -1083,9 +1401,11 @@ export async function saveMinutes(userId: string, input: SaveMinutesInput): Prom
       minutesId = String(current.id);
       const previous = mapMinutes(current);
       await client.query(
-        `INSERT INTO meeting_minutes_revisions (id, meeting_minutes_id, version, snapshot, changed_by, created_at)
-         VALUES ($1, $2, $3, $4::jsonb, $5, now())`,
-        [`minutes-revision-${randomUUID()}`, minutesId, currentVersion, JSON.stringify(previous), userId]
+        `INSERT INTO meeting_minutes_revisions (
+           id, organization_id, meeting_id, meeting_minutes_id, version, snapshot, changed_by, created_at
+         ) VALUES ($1, $2, $3, $4, $5, $6::jsonb, $7, now())`,
+        [`minutes-revision-${randomUUID()}`, parsed.organizationId, parsed.meetingId,
+          minutesId, currentVersion, JSON.stringify(previous), userId]
       );
       nextVersion = currentVersion + 1;
       await client.query(
@@ -1101,6 +1421,8 @@ export async function saveMinutes(userId: string, input: SaveMinutesInput): Prom
     const saved = await loadMinutesDocument(client, parsed.organizationId, parsed.meetingId);
     if (saved.version !== nextVersion) throw new Error("MINUTES_SAVE_FAILED");
     return saved;
+      }
+    });
   });
 }
 
@@ -1111,14 +1433,10 @@ export async function getMinutesRevisions(
 ): Promise<MinutesRevision[]> {
   const pool = getDatabasePool();
   await requireActiveMembership(pool, userId, organizationId);
-  const minutes = await pool.query(
-    `SELECT id FROM meeting_minutes WHERE organization_id = $1 AND meeting_id = $2 AND status = 'CONFIRMED'`,
-    [organizationId, meetingId]
-  );
-  if (!minutes.rows[0]) throw new Error("MINUTES_NOT_FOUND");
+  const activeMinutes = await loadMinutesDocument(pool, organizationId, meetingId);
   const result = await pool.query(
     `SELECT * FROM meeting_minutes_revisions WHERE meeting_minutes_id = $1 ORDER BY version DESC`,
-    [(minutes.rows[0] as Row).id]
+    [activeMinutes.id]
   );
   return result.rows.map((raw) => {
     const row = raw as Row;

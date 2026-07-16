@@ -18,7 +18,7 @@ export default async function MeetingDetailPage({ params }: { params: Promise<{ 
         <AppHeader displayName={session.user.displayName} />
         <section className="content-page">
           <nav className="breadcrumb" aria-label="현재 위치"><Link href="/meetings">회의록 목록</Link><span>/</span><span>상세 조회</span></nav>
-          <MeetingDetail detail={detail} />
+          <MeetingDetail detail={detail} canDelete={session.membership.role === "ORG_ADMIN" || session.membership.role === "PROJECT_ADMIN"} />
         </section>
       </main>
     );

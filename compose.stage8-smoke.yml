@@ -1,0 +1,55 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: meetingloop_smoke
+      POSTGRES_USER: meetingloop
+      POSTGRES_PASSWORD: stage8-smoke-password
+    volumes:
+      - postgres-smoke-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U meetingloop -d meetingloop_smoke"]
+      interval: 2s
+      timeout: 3s
+      retries: 20
+
+  migrate:
+    environment:
+      DATABASE_URL: postgresql://meetingloop:stage8-smoke-password@postgres:5432/meetingloop_smoke
+      DATABASE_SSL: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    environment:
+      APP_URL: http://127.0.0.1:3101
+      DATABASE_URL: postgresql://meetingloop:stage8-smoke-password@postgres:5432/meetingloop_smoke
+      DATABASE_SSL: "false"
+      SESSION_SECRET: stage8-smoke-session-secret-change-before-production
+      ANALYSIS_PROVIDER: ollama
+      RETENTION_SWEEP_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  worker:
+    environment:
+      DATABASE_URL: postgresql://meetingloop:stage8-smoke-password@postgres:5432/meetingloop_smoke
+      DATABASE_SSL: "false"
+      RETENTION_SWEEP_ENABLED: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  db-backup:
+    environment:
+      DATABASE_URL: postgresql://meetingloop:stage8-smoke-password@postgres:5432/meetingloop_smoke
+      DATABASE_SSL: "false"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+volumes:
+  postgres-smoke-data:
