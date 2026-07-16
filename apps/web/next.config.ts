@@ -8,7 +8,7 @@ const standaloneOutput = process.platform === "win32" ? {} : { output: "standalo
 const nextConfig: NextConfig = {
   ...standaloneOutput,
   outputFileTracingRoot: workspaceRoot,
-  transpilePackages: ["@meetingloop/ai", "@meetingloop/db", "@meetingloop/domain", "@meetingloop/ui"]
+  transpilePackages: ["@meetingloop/ai", "@meetingloop/db", "@meetingloop/domain", "@meetingloop/queue", "@meetingloop/ui"]
 };
 
 export default nextConfig;

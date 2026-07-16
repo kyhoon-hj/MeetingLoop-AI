@@ -2,6 +2,8 @@
 
 회의 음성, 회의록, 결정, 할 일, 개발 영향 분석을 연결하는 한국어 우선 반응형 웹 플랫폼입니다.
 
+원본 음성은 브라우저에만 보관하며 서버에는 사용자가 확정한 최종 전사와 회의록만 저장합니다. 상세 기준은 [데이터 저장 및 개인정보 처리 정책](docs/DATA_STORAGE_POLICY.md)을 따릅니다.
+
 ## 로컬 실행
 
 ```bash
@@ -9,7 +11,35 @@ pnpm install
 docker compose -f infra/docker-compose.yml up -d
 pnpm db:migrate
 pnpm db:seed
-pnpm dev
+pnpm dev:3101
+```
+
+### 로컬 PostgreSQL
+
+개발 DB의 기본 주소는 `localhost:5432/meeting`입니다.
+
+```dotenv
+DATABASE_URL=postgresql://postgres:change-me@localhost:5432/meeting
+DATABASE_SSL=false
+DB_POOL_MAX=10
+```
+
+PostgreSQL만 Docker로 실행하고 마이그레이션하려면 다음 명령을 사용합니다.
+
+```bash
+docker compose -f infra/docker-compose.yml up -d postgres
+pnpm db:migrate
+pnpm db:seed
+```
+
+개발 seed는 `admin@example.com / ChangeMe123!` 계정을 생성하며 `NODE_ENV=production`에서는 실행되지 않습니다.
+
+기존 `postgres-data` 볼륨이 이미 만들어진 상태에서 `POSTGRES_DB`만 변경하면 `meeting` DB가 자동 생성되지 않습니다. 기존 데이터가 필요 없을 때만 볼륨을 제거하고 다시 실행하거나, 기존 PostgreSQL 관리 계정으로 `meeting` DB를 별도로 생성해야 합니다.
+
+실제 DB 연결 준비 상태는 다음 엔드포인트에서 확인할 수 있습니다.
+
+```text
+GET /api/health/ready
 ```
 
 ## 검증
@@ -25,7 +55,7 @@ pnpm build
 
 ## EC2 Docker 데모 배포
 
-현재 Docker 구성은 애플리케이션 데이터를 프로세스 메모리에 저장하는 데모 배포입니다. 컨테이너를 재시작하거나 새 이미지로 교체하면 가입 사용자, 프로젝트, 회의 데이터가 초기화됩니다.
+사용자, 조직, 프로젝트와 회의 기본 데이터는 PostgreSQL에 저장되므로 웹 프로세스나 컨테이너를 재시작해도 유지됩니다. PostgreSQL 볼륨을 제거하면 데이터가 삭제되므로 운영에서는 별도 백업 정책이 필요합니다.
 
 EC2에 Docker Engine과 Compose 플러그인을 설치한 뒤 저장소 루트에서 실행합니다.
 
@@ -34,21 +64,36 @@ cp .env.docker.example .env.docker
 openssl rand -base64 48
 ```
 
-생성한 값을 `.env.docker`의 `SESSION_SECRET`에 넣고 `APP_URL`, AI 제공자 설정을 수정합니다. 그다음 이미지를 빌드하고 실행합니다.
+생성한 값을 `.env.docker`의 `SESSION_SECRET`에 넣고 `APP_URL`, AI 제공자 설정을 수정합니다. `POSTGRES_OPS_VERSION`은 운영 PostgreSQL major와 같아야 합니다. 그다음 이미지를 빌드하고 실행합니다.
+
+PostgreSQL이 같은 EC2 호스트에서 실행 중이면 예시처럼 `host.docker.internal`을 사용합니다. 이 이름은 `compose.ec2.yml`의 `host-gateway` 설정으로 EC2 호스트에 연결됩니다. PostgreSQL의 `listen_addresses`와 `pg_hba.conf`에는 Docker bridge 대역의 접속을 허용해야 하며, EC2 보안 그룹에서 5432 포트를 외부에 공개할 필요는 없습니다. 운영 RDS를 사용한다면 `DATABASE_URL`의 호스트를 RDS endpoint로 바꾸고 `DATABASE_SSL=true`를 적용합니다.
 
 ```bash
-docker compose -f compose.ec2.yml up -d --build
+docker compose -f compose.ec2.yml build
+docker compose -f compose.ec2.yml --profile ops build db-backup
+docker compose -f compose.ec2.yml --profile ops run --rm db-backup
+docker compose -f compose.ec2.yml up -d --no-build redis
+docker compose -f compose.ec2.yml run --rm migrate
+docker compose -f compose.ec2.yml up -d --no-build --no-deps web worker
 docker compose -f compose.ec2.yml ps
-docker compose -f compose.ec2.yml logs -f web
+curl --fail http://127.0.0.1:3101/api/health/ready
+docker compose -f compose.ec2.yml exec worker node -e "fetch('http://127.0.0.1:3001/health/ready').then(r=>{if(!r.ok)process.exit(1);return r.text()}).then(console.log)"
+docker compose -f compose.ec2.yml logs -f web worker
 ```
 
-EC2 보안 그룹에서 테스트할 클라이언트에 대해서만 TCP 3101 인바운드를 허용하면 `http://EC2_PUBLIC_IP:3101`으로 접속할 수 있습니다. 컨테이너 내부에서는 3000번 포트를 사용하고 EC2의 3101번 포트로 전달합니다. 브라우저 마이크 녹음은 HTTPS가 필요하므로 실제 녹음 테스트에는 Nginx 또는 Application Load Balancer와 인증서를 연결해야 합니다.
+`docker compose up -d --build` 한 번으로 migration과 웹 실행을 이어서 수행할 수도 있지만, 위처럼 migration을 먼저 분리 실행하면 실패 시 새 웹 컨테이너로 교체하지 않고 배포를 중단할 수 있습니다.
+
+컨테이너 내부 3000번 포트는 EC2의 `127.0.0.1:3101`에만 연결되므로 외부에서 3101로 직접 접속할 수 없습니다. Nginx가 `http://127.0.0.1:3101`로 reverse proxy하도록 설정하고 EC2 보안 그룹에는 80과 443만 허용합니다. 브라우저 마이크 녹음은 HTTPS가 필요하므로 `meeting.hjshub.com` 인증서를 연결해야 합니다.
 
 배포 갱신은 최신 코드를 받은 뒤 다시 빌드합니다.
 
 ```bash
 git pull
-docker compose -f compose.ec2.yml up -d --build
+docker compose -f compose.ec2.yml build
+docker compose -f compose.ec2.yml --profile ops run --rm db-backup
+docker compose -f compose.ec2.yml up -d --no-build redis
+docker compose -f compose.ec2.yml run --rm migrate
+docker compose -f compose.ec2.yml up -d --no-build --no-deps web worker
 ```
 
 ## 무료 AI 회의록
@@ -78,7 +123,7 @@ GEMINI_API_KEY=발급받은_API_키
 GEMINI_MODEL=gemini-3.1-flash-lite
 ```
 
-Gemini 모드에서는 수정된 전사 TXT가 Google Gemini API로 전송됩니다. `기존 녹음 파일 AI 분석` 또는 `방금 녹음 AI 분석`을 선택한 경우에만 원본 음성이 분석 요청 동안 Gemini로 전송되며, 앱 서버의 디스크나 DB에는 저장하지 않습니다.
+Gemini 모드에서는 수정된 전사 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송하지 않습니다.
 
 ## Phase 0 범위
 

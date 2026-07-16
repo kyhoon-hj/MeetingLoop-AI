@@ -1,24 +1,16 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import AudioQualityPanel from "./AudioQualityPanel";
+import FeedbackDialog from "./FeedbackDialog";
+import TranscriptEditor, { type TranscriptEditorSegment, type TranscriptParticipantOption } from "./TranscriptEditor";
+import { recordingExtension } from "./browser-recording";
+import { MeetingApiClientError, meetingApiRequest } from "./meeting-api-client";
+import { useBrowserRecording } from "./useBrowserRecording";
 
-type RecordingState = "idle" | "requesting" | "recording" | "paused" | "stopped" | "error";
-type UploadState = "idle" | "uploading" | "failed" | "complete";
-type TranscriptStatus = "draft" | "saved";
+type TranscriptStatus = "draft" | "confirmed";
 type AiAnalysisMode = "ollama" | "gemini";
 type WorkspaceView = "minutes" | "transcript";
-
-interface StoredChunkMeta {
-  id: string;
-  size: number;
-  type: string;
-  createdAt: string;
-}
-
-interface StoredChunkRecord extends StoredChunkMeta {
-  blob: Blob;
-  uploadStatus: "PENDING" | "UPLOADED" | "FAILED";
-}
 
 interface LiveTranscriptAlternative {
   transcript: string;
@@ -38,7 +30,6 @@ interface LiveSpeechRecognition {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
-  maxAlternatives: number;
   onresult: ((event: LiveTranscriptEvent) => void) | null;
   onerror: (() => void) | null;
   onend: (() => void) | null;
@@ -49,26 +40,20 @@ interface LiveSpeechRecognition {
 interface LiveTranscriptSegment {
   id: string;
   timecode: string;
-  speakerId: string;
   speaker: string;
   rawText: string;
+  normalizedText: string;
   text: string;
   status: TranscriptStatus;
-}
-
-interface ParticipantProfile {
-  id: string;
-  name: string;
-}
-
-interface RecognitionDraftState {
-  segmentId: string;
-  sourceText: string;
-  committedPrefix: string;
-  lastUpdatedAt: number;
+  source: "LIVE" | "MANUAL" | "STT";
+  confidence: number | null;
+  overlapSeverity: "LOW" | "MEDIUM" | "HIGH" | null;
+  speakerStatus: "UNCONFIRMED" | "CONFIRMED";
 }
 
 interface MinutesDraft {
+  version: number;
+  updatedAt: string;
   title: string;
   summary: string;
   keyPoints: string[];
@@ -87,71 +72,106 @@ interface MinutesDraft {
 
 interface RecordingPanelProps {
   meetingId?: string | undefined;
+  organizationId?: string | undefined;
+  recordingConsentRecorded?: boolean | undefined;
+  initialView?: WorkspaceView | undefined;
+  participants?: TranscriptParticipantOption[] | undefined;
 }
 
 interface AiProviderState {
   available: boolean;
+  mode: "demo" | "real";
   model: string;
   message: string;
+  externalTransmission: boolean;
+  estimatedCost: string;
+  expectedLatency: string;
+  qualityProfile: string;
 }
 
 interface AiStatus {
   defaultMode: AiAnalysisMode;
   activeProvider: "mock" | AiAnalysisMode;
+  mock: AiProviderState;
   ollama: AiProviderState & { serviceReachable: boolean };
   gemini: AiProviderState;
+  queue: {
+    mode: "inline" | "redis";
+    reachable: boolean;
+    waiting: number;
+    active: number;
+    failed: number;
+    lag: number;
+    message: string;
+  };
 }
 
-interface ImportedAudioAnalysis {
-  file: { name: string; size: number; mimeType: string };
-  provider: { kind: "mock" | AiAnalysisMode; model: string };
-  analysisInput: { source: "IMPORTED_AUDIO"; segmentCount: number };
-  transcript: Array<{
+interface FeedbackState {
+  title: string;
+  message: string;
+  tone: "error" | "warning" | "info";
+}
+
+interface ApiErrorPayload {
+  error?: string;
+  message?: string;
+  currentVersion?: number;
+}
+
+interface ServerTranscript {
+  version: number;
+  updatedAt: string;
+  segments: Array<{
     id: string;
     sequence: number;
     speakerLabel: string;
     startMs: number;
     endMs: number;
-    rawText: string;
     editedText: string;
+    source: "LIVE" | "MANUAL" | "STT";
   }>;
-  minutes: MinutesDraft;
+}
+
+function apiFailureMessage(payload: ApiErrorPayload | null, fallback: string): string {
+  if (payload?.message) return payload.message;
+  const messages: Record<string, string> = {
+    UNAUTHENTICATED: "로그인이 만료되었습니다. 다시 로그인해 주세요.",
+    INVALID_INPUT: "입력한 내용을 확인한 뒤 다시 시도해 주세요.",
+    TRANSCRIPT_REQUIRED: "확정된 전사 TXT가 필요합니다. 최종 전사 확정을 먼저 진행해 주세요.",
+    TRANSCRIPT_EDIT_FORBIDDEN: "최종 전사를 수정할 권한이 없습니다.",
+    TRANSCRIPT_NOT_FOUND: "서버에 저장된 최종 전사가 없습니다. 전사 문장을 확인한 뒤 최초 확정해 주세요.",
+    TRANSCRIPT_VERSION_CONFLICT: "다른 사용자가 먼저 전사를 수정했습니다. 서버 저장본을 다시 불러온 뒤 수정 내용을 다시 반영해 주세요.",
+    TRANSCRIPT_REQUEST_TOO_LARGE: "전사 요청 크기가 1MB를 초과했습니다. 문장 수나 문장 길이를 줄여 주세요.",
+    TRANSCRIPT_SEGMENT_LIMIT_EXCEEDED: "전사 문장은 한 번에 최대 200개까지 저장할 수 있습니다.",
+    TRANSCRIPT_SEGMENT_TEXT_TOO_LONG: "전사 문장 하나는 최대 4,000자까지 입력할 수 있습니다.",
+    TRANSCRIPT_SEGMENT_TIME_INVALID: "전사 문장의 종료 시각은 시작 시각보다 빠를 수 없습니다.",
+    TRANSCRIPT_SEQUENCE_DUPLICATED: "전사 문장 순서가 중복되었습니다. 서버 저장본을 다시 불러와 주세요.",
+    TRANSCRIPT_TEXT_TOO_LARGE: "전체 전사 텍스트가 허용된 크기를 초과했습니다.",
+    INVALID_TRANSCRIPT_INPUT: "전사 문장의 화자, 시간 또는 내용을 확인해 주세요.",
+    MINUTES_EDIT_FORBIDDEN: "회의록을 생성하거나 수정할 권한이 없습니다.",
+    MINUTES_CONFIRM_FORBIDDEN: "회의록을 최종 확정할 권한이 없습니다.",
+    MINUTES_NOT_FOUND: "서버에 저장된 최종 회의록이 없습니다.",
+    MINUTES_VERSION_CONFLICT: "다른 사용자가 먼저 회의록을 수정했습니다. 저장본을 다시 불러온 뒤 수정 내용을 다시 반영해 주세요.",
+    MEETING_NOT_FOUND: "회의 정보를 찾을 수 없습니다. 화면을 새로고침해 주세요.",
+    AI_CONFIGURATION_REQUIRED: "AI 설정이 필요합니다. API 키 또는 로컬 AI 설정을 확인해 주세요.",
+    AI_PROVIDER_UNAVAILABLE: "AI 제공자에 연결할 수 없습니다. 연결 상태와 설정을 확인해 주세요.",
+    AI_MODEL_NOT_FOUND: "설정한 AI 모델을 찾을 수 없습니다. 모델 이름이나 설치 상태를 확인해 주세요.",
+    AI_GENERATION_IN_PROGRESS: "이 회의의 AI 보고서를 이미 생성하고 있습니다. 완료될 때까지 기다려 주세요.",
+    AI_TIMEOUT: "AI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.",
+    AI_RATE_LIMITED: "AI 요청이 많습니다. 잠시 후 다시 시도해 주세요.",
+    AI_RESPONSE_INVALID: "AI 응답 형식이 올바르지 않습니다. 다시 생성해 주세요."
+  };
+  return payload?.error ? (messages[payload.error] ?? fallback) : fallback;
 }
 
 declare global {
   interface Window {
     SpeechRecognition?: new () => LiveSpeechRecognition;
     webkitSpeechRecognition?: new () => LiveSpeechRecognition;
-    webkitAudioContext?: typeof AudioContext;
   }
 }
 
-const databaseName = "meetingloop-recordings";
-const storeName = "chunks";
-const microphoneRequestTimeoutMs = 30_000;
-const speechTurnGapMs = 900;
-const maxInlineAudioBytes = 14 * 1024 * 1024;
-const recordingMimeTypeCandidates = [
-  "audio/webm;codecs=opus",
-  "audio/webm",
-  "audio/mp4;codecs=mp4a.40.2",
-  "audio/mp4"
-];
-const defaultParticipants: ParticipantProfile[] = [
-  { id: "speaker-1", name: "화자 1" },
-  { id: "speaker-2", name: "화자 2" }
-];
-const initialLiveTranscript: LiveTranscriptSegment[] = [
-  {
-    id: "intro",
-    timecode: "00:00",
-    speakerId: "speaker-1",
-    speaker: "화자 1",
-    rawText: "녹음을 시작하면 이 영역에 실시간 전사 초안이 표시됩니다. 잘못 인식된 문장은 바로 수정하거나 삭제할 수 있습니다.",
-    text: "녹음을 시작하면 이 영역에 실시간 전사 초안이 표시됩니다. 잘못 인식된 문장은 바로 수정하거나 삭제할 수 있습니다.",
-    status: "draft"
-  }
-];
+const initialLiveTranscript: LiveTranscriptSegment[] = [];
 
 function formatElapsed(seconds: number): string {
   const minutes = Math.floor(seconds / 60).toString().padStart(2, "0");
@@ -164,97 +184,6 @@ function timecodeToMs(timecode: string): number {
   return ((Number(minutes) * 60) + Number(seconds)) * 1000;
 }
 
-function preferredRecordingMimeType(): string | undefined {
-  return recordingMimeTypeCandidates.find((mimeType) => {
-    try {
-      return MediaRecorder.isTypeSupported(mimeType);
-    } catch {
-      return false;
-    }
-  });
-}
-
-function recordingExtension(mimeType: string): "m4a" | "ogg" | "webm" {
-  const normalized = mimeType.toLowerCase();
-  if (normalized.includes("mp4") || normalized.includes("aac") || normalized.includes("m4a")) {
-    return "m4a";
-  }
-  if (normalized.includes("ogg")) {
-    return "ogg";
-  }
-  return "webm";
-}
-
-function recordingName(mimeType: string): string {
-  const timestamp = new Date().toISOString().replace(/[:.]/g, "-");
-  return `meeting-recording-${timestamp}.${recordingExtension(mimeType)}`;
-}
-
-function formatFileSize(size: number): string {
-  if (size < 1024) {
-    return `${size} bytes`;
-  }
-  if (size < 1024 * 1024) {
-    return `${(size / 1024).toFixed(1)}KB`;
-  }
-  return `${(size / (1024 * 1024)).toFixed(1)}MB`;
-}
-
-function requestMicrophoneStream(): Promise<MediaStream> {
-  return new Promise((resolve, reject) => {
-    let settled = false;
-    const timeoutId = window.setTimeout(() => {
-      settled = true;
-      reject(new DOMException("Microphone permission request timed out", "TimeoutError"));
-    }, microphoneRequestTimeoutMs);
-
-    navigator.mediaDevices.getUserMedia({
-      audio: {
-        autoGainControl: true,
-        channelCount: 1,
-        echoCancellation: true,
-        noiseSuppression: true
-      }
-    }).then((stream) => {
-      if (settled) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-
-      settled = true;
-      window.clearTimeout(timeoutId);
-      resolve(stream);
-    }).catch((error: unknown) => {
-      if (settled) {
-        return;
-      }
-
-      settled = true;
-      window.clearTimeout(timeoutId);
-      reject(error);
-    });
-  });
-}
-
-function microphoneErrorMessage(error: unknown): string {
-  const errorName = error instanceof DOMException ? error.name : "";
-
-  if (errorName === "NotAllowedError" || errorName === "SecurityError") {
-    return "마이크 권한이 차단되었습니다. 주소창의 마이크 아이콘에서 권한을 허용한 뒤 다시 눌러주세요.";
-  }
-  if (errorName === "NotFoundError") {
-    return "사용할 수 있는 마이크를 찾지 못했습니다. 마이크 연결 상태를 확인해 주세요.";
-  }
-  if (errorName === "NotReadableError" || errorName === "AbortError") {
-    return "다른 앱이 마이크를 사용 중입니다. 해당 앱을 닫은 뒤 다시 시도해 주세요.";
-  }
-  if (errorName === "TimeoutError") {
-    return "마이크 권한 확인 시간이 초과되었습니다. 주소창의 마이크 권한을 확인한 뒤 다시 시도해 주세요.";
-  }
-
-  return "마이크를 시작하지 못했습니다. 권한과 마이크 연결 상태를 확인한 뒤 다시 시도해 주세요.";
-}
-
 async function requestAiStatus(): Promise<AiStatus> {
   const response = await fetch("/api/ai/status", { cache: "no-store" });
   if (!response.ok) {
@@ -263,142 +192,248 @@ async function requestAiStatus(): Promise<AiStatus> {
   return response.json() as Promise<AiStatus>;
 }
 
-function openDatabase(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
-    const request = indexedDB.open(databaseName, 1);
-    request.onupgradeneeded = () => {
-      request.result.createObjectStore(storeName, { keyPath: "id" });
-    };
-    request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB open failed"));
-  });
+function createMutationIdempotencyKey(scope: "transcript" | "minutes" | "recording-consent" | "external-ai-consent"): string {
+  const id = globalThis.crypto?.randomUUID?.() ?? `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  return `${scope}-${id}`;
 }
 
-async function storeChunk(blob: Blob): Promise<StoredChunkMeta> {
-  const db = await openDatabase();
-  const meta: StoredChunkMeta = {
-    id: `chunk-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-    size: blob.size,
-    type: blob.type || "audio/webm",
-    createdAt: new Date().toISOString()
-  };
-
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(storeName, "readwrite");
-    transaction.objectStore(storeName).put({ ...meta, blob, uploadStatus: "PENDING" satisfies StoredChunkRecord["uploadStatus"] });
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB write failed"));
-  });
-  db.close();
-  return meta;
-}
-
-async function readPendingChunks(): Promise<StoredChunkRecord[]> {
-  const db = await openDatabase();
-  const chunks = await new Promise<StoredChunkRecord[]>((resolve, reject) => {
-    const transaction = db.transaction(storeName, "readonly");
-    const request = transaction.objectStore(storeName).getAll();
-    request.onsuccess = () => resolve((request.result as StoredChunkRecord[]).filter((chunk) => chunk.uploadStatus !== "UPLOADED"));
-    request.onerror = () => reject(request.error ?? new Error("IndexedDB read failed"));
-  });
-  db.close();
-  return chunks.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
-}
-
-async function markChunkUploaded(chunk: StoredChunkRecord): Promise<void> {
-  const db = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(storeName, "readwrite");
-    transaction.objectStore(storeName).put({ ...chunk, uploadStatus: "UPLOADED" });
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB update failed"));
-  });
-  db.close();
-}
-
-async function deleteLocalChunks(): Promise<void> {
-  const db = await openDatabase();
-  await new Promise<void>((resolve, reject) => {
-    const transaction = db.transaction(storeName, "readwrite");
-    transaction.objectStore(storeName).clear();
-    transaction.oncomplete = () => resolve();
-    transaction.onerror = () => reject(transaction.error ?? new Error("IndexedDB clear failed"));
-  });
-  db.close();
-}
-
-export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
-  const [state, setState] = useState<RecordingState>("idle");
-  const [elapsedSeconds, setElapsedSeconds] = useState(0);
-  const [level, setLevel] = useState(0);
-  const [chunkCount, setChunkCount] = useState(0);
-  const [storedBytes, setStoredBytes] = useState(0);
-  const [uploadedChunks, setUploadedChunks] = useState(0);
-  const [uploadState, setUploadState] = useState<UploadState>("idle");
-  const [uploadProgress, setUploadProgress] = useState(0);
-  const [participants, setParticipants] = useState<ParticipantProfile[]>(defaultParticipants);
-  const [activeParticipantId, setActiveParticipantId] = useState(defaultParticipants[0]?.id ?? "speaker-1");
+export default function RecordingPanel({
+  meetingId, organizationId, recordingConsentRecorded = false, initialView = "transcript", participants = []
+}: RecordingPanelProps) {
   const [liveTranscript, setLiveTranscript] = useState<LiveTranscriptSegment[]>(initialLiveTranscript);
   const [transcriptMessage, setTranscriptMessage] = useState("실시간 전사 초안은 저장 전까지 자유롭게 수정할 수 있습니다.");
   const [minutesDraft, setMinutesDraft] = useState<MinutesDraft | null>(null);
   const [minutesMessage, setMinutesMessage] = useState("전사 TXT를 저장한 뒤 AI 분석 보고서를 만들 수 있습니다.");
   const [analysisMode, setAnalysisMode] = useState<AiAnalysisMode>("ollama");
-  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>("transcript");
+  const [recordingConsentConfirmed, setRecordingConsentConfirmed] = useState(recordingConsentRecorded);
+  const [geminiConsentConfirmed, setGeminiConsentConfirmed] = useState(false);
+  const [workspaceView, setWorkspaceView] = useState<WorkspaceView>(initialView);
   const [aiStatus, setAiStatus] = useState<AiStatus | null>(null);
   const [aiStatusMessage, setAiStatusMessage] = useState("AI 연결 상태를 확인하고 있습니다.");
   const [isGeneratingMinutes, setIsGeneratingMinutes] = useState(false);
-  const [isAnalyzingAudioFile, setIsAnalyzingAudioFile] = useState(false);
-  const [audioImportMessage, setAudioImportMessage] = useState("최대 14MB · AI 분석 중 Gemini로 전송, 앱 서버에는 미보관");
   const [isFinalizingMinutes, setIsFinalizingMinutes] = useState(false);
-  const [finalRecordMessage, setFinalRecordMessage] = useState("AI 분석 보고서를 수정한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
-  const [recordingFileUrl, setRecordingFileUrl] = useState<string | null>(null);
-  const [recordingFileName, setRecordingFileName] = useState("meeting-recording.webm");
-  const [recordingFileSize, setRecordingFileSize] = useState(0);
-  const [message, setMessage] = useState("마이크 권한을 허용하면 브라우저 녹음을 시작할 수 있습니다.");
-  const mediaRecorderRef = useRef<MediaRecorder | null>(null);
-  const streamRef = useRef<MediaStream | null>(null);
-  const levelTimerRef = useRef<number | null>(null);
-  const levelAnimationFrameRef = useRef<number | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const elapsedSecondsRef = useRef(0);
-  const participantsRef = useRef<ParticipantProfile[]>(defaultParticipants);
-  const activeParticipantIdRef = useRef(activeParticipantId);
+  const [minutesSavedVersion, setMinutesSavedVersion] = useState<number | null>(null);
+  const [minutesUpdatedAt, setMinutesUpdatedAt] = useState<string | null>(null);
+  const [isLoadingMinutes, setIsLoadingMinutes] = useState(false);
+  const [confirmMinutesReload, setConfirmMinutesReload] = useState(false);
+  const [finalRecordMessage, setFinalRecordMessage] = useState("AI 회의록을 수정한 뒤 최종 확정할 수 있습니다.");
+  const [feedback, setFeedback] = useState<FeedbackState | null>(null);
+  const [transcriptVersion, setTranscriptVersion] = useState<number | null>(null);
+  const [transcriptUpdatedAt, setTranscriptUpdatedAt] = useState<string | null>(null);
+  const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
+  const [transcriptServerReady, setTranscriptServerReady] = useState(!meetingId);
+  const [confirmServerReload, setConfirmServerReload] = useState(false);
+  const [reviewDecisionBlockers, setReviewDecisionBlockers] = useState(0);
   const recognitionRef = useRef<LiveSpeechRecognition | null>(null);
   const recognitionShouldRunRef = useRef(false);
-  const recordingRequestIdRef = useRef(0);
-  const recognitionDraftsRef = useRef<Map<number, RecognitionDraftState>>(new Map());
-  const recordedChunksRef = useRef<Blob[]>([]);
-  const recordingBlobRef = useRef<Blob | null>(null);
-  const localChunkStorageFailedRef = useRef(false);
+  const liveDraftIdRef = useRef<string | null>(null);
   const minutesPaneRef = useRef<HTMLElement | null>(null);
-  const audioFileInputRef = useRef<HTMLInputElement | null>(null);
+  const transcriptLoadRequestIdRef = useRef(0);
+  const transcriptUserEditedRef = useRef(false);
+  const transcriptMutationRef = useRef<{ payload: string; key: string } | null>(null);
+  const minutesLoadRequestIdRef = useRef(0);
+  const minutesUserEditedRef = useRef(false);
+  const minutesMutationRef = useRef<{ payload: string; key: string } | null>(null);
+  const recordingAudioRef = useRef<HTMLAudioElement | null>(null);
+  const recordingRepeatTimerRef = useRef<number | null>(null);
 
   useEffect(() => {
-    if (state !== "recording") {
-      return undefined;
-    }
-
-    const timer = window.setInterval(() => {
-      setElapsedSeconds((value) => {
-        const nextValue = value + 1;
-        elapsedSecondsRef.current = nextValue;
-        return nextValue;
-      });
-    }, 1000);
-    levelTimerRef.current = timer;
-
-    return () => {
-      window.clearInterval(timer);
+    if (!meetingId || !organizationId) return;
+    const syncPendingConsent = () => {
+      if (!navigator.onLine) return;
+      const key = `meetingloop:pending-recording-consent:${meetingId}`;
+      const pending = window.localStorage.getItem(key);
+      if (!pending) return;
+      void fetch(`/api/meetings/${encodeURIComponent(meetingId)}/recording-consent`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: pending
+      }).then((response) => {
+        if (response.ok) window.localStorage.removeItem(key);
+      }).catch(() => undefined);
     };
-  }, [state]);
+    syncPendingConsent();
+    window.addEventListener("online", syncPendingConsent);
+    return () => window.removeEventListener("online", syncPendingConsent);
+  }, [meetingId, organizationId]);
+
+  const showFeedback = useCallback((title: string, detail: string, tone: FeedbackState["tone"] = "error") => {
+    setFeedback({ title, message: detail, tone });
+  }, []);
+
+  const {
+    state,
+    elapsedSeconds,
+    level,
+    message,
+    networkState,
+    storageMode,
+    chunkCount,
+    storedBytes,
+    confirmedChunks: uploadedChunks,
+    confirmationState: uploadState,
+    confirmationProgress: uploadProgress,
+    recordingFileUrl,
+    recordingFileName,
+    recordingFileSize,
+    inputTestState,
+    inputTestRemainingMs,
+    inputTestReport,
+    recordingQualityReport,
+    qualityMessage,
+    isAnalyzingQuality,
+    runInputTest,
+    startRecording,
+    cancelRecordingRequest,
+    pauseRecording,
+    resumeRecording,
+    stopRecording,
+    confirmLocalChunks,
+    deleteLocalAudio
+  } = useBrowserRecording({
+    meetingId,
+    onRecordingStart: () => {
+      liveDraftIdRef.current = null;
+      transcriptUserEditedRef.current = true;
+      setLiveTranscript([]);
+      setWorkspaceView("transcript");
+      setTranscriptMessage("말하는 내용이 전사 초안으로 표시됩니다. 잘못된 문장은 바로 고칠 수 있습니다.");
+    },
+    onStartRecognition: startLiveRecognition,
+    onStopRecognition: stopLiveRecognition,
+    onFeedback: showFeedback
+  });
+
+  async function startRecordingWithConsent() {
+    if (!meetingId || !organizationId) {
+      showFeedback("회의 정보가 필요합니다", "회의를 먼저 생성한 뒤 녹음을 시작해 주세요.", "warning");
+      return;
+    }
+    if (!recordingConsentConfirmed) {
+      showFeedback("녹음 동의를 확인해 주세요", "참석자에게 녹음 사실과 브라우저 보관 정책을 안내하고 동의를 확인해야 합니다.", "warning");
+      return;
+    }
+    const payload = JSON.stringify({
+      organizationId, meetingId, consentConfirmed: true,
+      idempotencyKey: createMutationIdempotencyKey("recording-consent"), confirmedAt: new Date().toISOString()
+    });
+    try {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/recording-consent`, {
+        method: "POST", headers: { "Content-Type": "application/json" }, body: payload
+      });
+      if (!response.ok) throw new Error("RECORDING_CONSENT_SAVE_FAILED");
+    } catch {
+      if (navigator.onLine) {
+        showFeedback("녹음 동의를 기록하지 못했습니다", "서버 연결을 확인한 뒤 다시 시도해 주세요.", "error");
+        return;
+      }
+      window.localStorage.setItem(`meetingloop:pending-recording-consent:${meetingId}`, payload);
+    }
+    await startRecording();
+  }
+
+  const applyServerTranscript = useCallback((transcript: ServerTranscript) => {
+    setLiveTranscript(transcript.segments.map((segment) => ({
+      id: segment.id,
+      timecode: formatElapsed(Math.floor(segment.startMs / 1000)),
+      speaker: segment.speakerLabel,
+      rawText: segment.editedText,
+      normalizedText: segment.editedText,
+      text: segment.editedText,
+      status: "confirmed",
+      source: segment.source,
+      confidence: null,
+      overlapSeverity: null,
+      speakerStatus: "CONFIRMED"
+    })));
+    setTranscriptVersion(transcript.version);
+    setTranscriptUpdatedAt(transcript.updatedAt);
+    transcriptUserEditedRef.current = false;
+  }, []);
+
+  const loadServerTranscript = useCallback(async (notify: boolean) => {
+    if (!meetingId) return;
+    const requestId = transcriptLoadRequestIdRef.current + 1;
+    transcriptLoadRequestIdRef.current = requestId;
+    setIsLoadingTranscript(true);
+    try {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`, { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as ({ transcript?: ServerTranscript | null } & ApiErrorPayload) | null;
+      if (requestId !== transcriptLoadRequestIdRef.current) return;
+      if (response.ok && payload?.transcript === null) {
+        setTranscriptVersion(null);
+        setTranscriptUpdatedAt(null);
+        setTranscriptMessage("아직 서버에 저장된 최종 전사가 없습니다. 전사를 작성한 뒤 최종 확정해 주세요.");
+        if (notify) showFeedback("서버 저장본이 없습니다", "아직 저장된 최종 전사가 없습니다. 전사를 작성한 뒤 최종 확정해 주세요.", "info");
+        return;
+      }
+      if (!response.ok || !payload?.transcript) {
+        const detail = apiFailureMessage(payload, "서버 최종 전사를 불러오지 못했습니다.");
+        setTranscriptMessage(detail);
+        showFeedback("서버 저장본을 불러오지 못했습니다", detail);
+        return;
+      }
+      if (!notify && transcriptUserEditedRef.current) return;
+      applyServerTranscript(payload.transcript);
+      setTranscriptMessage(`서버에 저장된 최종 전사 v${payload.transcript.version}을 불러왔습니다.`);
+      if (notify) showFeedback("서버 저장본을 불러왔습니다", `최종 전사 v${payload.transcript.version}을 화면에 반영했습니다.`, "info");
+    } catch {
+      if (requestId !== transcriptLoadRequestIdRef.current) return;
+      const detail = "서버에 연결할 수 없습니다. 네트워크와 서버 실행 상태를 확인해 주세요.";
+      setTranscriptMessage(detail);
+      showFeedback("서버 연결 오류", detail);
+    } finally {
+      if (requestId === transcriptLoadRequestIdRef.current) {
+        setIsLoadingTranscript(false);
+        setTranscriptServerReady(true);
+      }
+    }
+  }, [applyServerTranscript, meetingId, showFeedback]);
 
   useEffect(() => {
-    participantsRef.current = participants;
-  }, [participants]);
+    void loadServerTranscript(false);
+  }, [loadServerTranscript]);
+
+  const loadServerMinutes = useCallback(async (notify: boolean) => {
+    if (!meetingId) return;
+    const requestId = minutesLoadRequestIdRef.current + 1;
+    minutesLoadRequestIdRef.current = requestId;
+    setIsLoadingMinutes(true);
+    try {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/minutes`, { cache: "no-store" });
+      const payload = await response.json().catch(() => null) as ({ minutes?: MinutesDraft | null } & ApiErrorPayload) | null;
+      if (requestId !== minutesLoadRequestIdRef.current) return;
+      if (response.ok && payload?.minutes === null) {
+        setMinutesSavedVersion(null);
+        setMinutesUpdatedAt(null);
+        setFinalRecordMessage("아직 서버에 저장된 최종 회의록이 없습니다. 최종 전사를 확정한 뒤 AI 회의록을 생성해 주세요.");
+        if (notify) showFeedback("서버 저장본이 없습니다", "저장된 최종 회의록이 없습니다. AI 보고서를 생성한 뒤 확정해 주세요.", "info");
+        return;
+      }
+      if (!response.ok || !payload?.minutes) {
+        const detail = apiFailureMessage(payload, "서버의 최종 회의록을 불러오지 못했습니다.");
+        setFinalRecordMessage(detail);
+        showFeedback("회의록을 불러오지 못했습니다", detail);
+        return;
+      }
+      if (!notify && minutesUserEditedRef.current) return;
+      setMinutesDraft(payload.minutes);
+      setMinutesSavedVersion(payload.minutes.version);
+      setMinutesUpdatedAt(payload.minutes.updatedAt);
+      minutesUserEditedRef.current = false;
+      setFinalRecordMessage(`서버에 저장된 최종 회의록 v${payload.minutes.version}을 불러왔습니다.`);
+      if (notify) showFeedback("회의록 저장본을 불러왔습니다", `최종 회의록 v${payload.minutes.version}을 화면에 반영했습니다.`, "info");
+    } catch {
+      if (requestId !== minutesLoadRequestIdRef.current) return;
+      const detail = "서버에 연결할 수 없습니다. 네트워크와 서버 실행 상태를 확인해 주세요.";
+      setFinalRecordMessage(detail);
+      showFeedback("서버 연결 오류", detail);
+    } finally {
+      if (requestId === minutesLoadRequestIdRef.current) setIsLoadingMinutes(false);
+    }
+  }, [meetingId, showFeedback]);
 
   useEffect(() => {
-    activeParticipantIdRef.current = activeParticipantId;
-  }, [activeParticipantId]);
+    void loadServerMinutes(false);
+  }, [loadServerMinutes]);
 
   useEffect(() => {
     let active = true;
@@ -423,111 +458,52 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   }, []);
 
   useEffect(() => () => {
-    recordingRequestIdRef.current += 1;
-    if (levelTimerRef.current) {
-      window.clearInterval(levelTimerRef.current);
-    }
     recognitionShouldRunRef.current = false;
     recognitionRef.current?.stop();
-    streamRef.current?.getTracks().forEach((track) => track.stop());
-    stopInputLevelMeter(false);
   }, []);
 
-  useEffect(() => () => {
-    if (recordingFileUrl) {
-      URL.revokeObjectURL(recordingFileUrl);
-    }
-  }, [recordingFileUrl]);
-
-  function writeRecognitionSegment(segmentId: string, text: string, isFinal: boolean) {
+  function upsertLiveDraft(text: string, isFinal: boolean) {
     const cleanText = text.trim();
     if (!cleanText) {
       return;
     }
 
-    const speakerId = activeParticipantIdRef.current;
-    const speaker = participantsRef.current.find((participant) => participant.id === speakerId)?.name.trim() || "화자";
+    const existingId = liveDraftIdRef.current;
+    const nextId = existingId ?? `segment-${Date.now()}-${Math.random().toString(16).slice(2)}`;
+    liveDraftIdRef.current = isFinal ? null : nextId;
+    transcriptUserEditedRef.current = true;
     setLiveTranscript((segments) => {
       const withoutIntro = segments.filter((segment) => segment.id !== "intro");
-      const existing = withoutIntro.find((segment) => segment.id === segmentId);
+      const existing = withoutIntro.find((segment) => segment.id === nextId);
       if (existing) {
         return withoutIntro.map((segment) => (
-          segment.id === segmentId
-            ? { ...segment, rawText: cleanText, text: cleanText, status: isFinal ? "saved" : "draft" }
+          segment.id === nextId
+            ? { ...segment, rawText: cleanText, normalizedText: cleanText, text: cleanText, status: "draft" }
             : segment
         ));
       }
       return [...withoutIntro, {
-        id: segmentId,
-        timecode: formatElapsed(elapsedSecondsRef.current),
-        speakerId,
-        speaker,
+        id: nextId,
+        timecode: formatElapsed(elapsedSeconds),
+        speaker: "화자 A",
         rawText: cleanText,
+        normalizedText: cleanText,
         text: cleanText,
-        status: isFinal ? "saved" : "draft"
+        status: "draft",
+        source: "LIVE",
+        confidence: 0.72,
+        overlapSeverity: null,
+        speakerStatus: "UNCONFIRMED"
       }];
     });
-  }
-
-  function upsertRecognitionDraft(resultIndex: number, text: string, isFinal: boolean) {
-    const cleanText = text.trim();
-    if (!cleanText) {
-      return;
-    }
-
-    const now = Date.now();
-    const currentDraft = recognitionDraftsRef.current.get(resultIndex);
-    let segmentId = currentDraft?.segmentId ?? `segment-${now}-${Math.random().toString(16).slice(2)}`;
-    let committedPrefix = currentDraft?.committedPrefix ?? "";
-    let visibleText = committedPrefix && cleanText.startsWith(committedPrefix)
-      ? cleanText.slice(committedPrefix.length).trimStart()
-      : cleanText;
-
-    if (currentDraft && now - currentDraft.lastUpdatedAt >= speechTurnGapMs) {
-      const appendedText = cleanText.startsWith(currentDraft.sourceText)
-        ? cleanText.slice(currentDraft.sourceText.length).trim()
-        : "";
-      if (appendedText) {
-        setLiveTranscript((segments) => segments.map((segment) => (
-          segment.id === currentDraft.segmentId ? { ...segment, status: "saved" } : segment
-        )));
-        segmentId = `segment-${now}-${Math.random().toString(16).slice(2)}`;
-        committedPrefix = currentDraft.sourceText;
-        visibleText = appendedText;
-      }
-    }
-
-    writeRecognitionSegment(segmentId, visibleText, isFinal);
-    if (isFinal) {
-      recognitionDraftsRef.current.delete(resultIndex);
-    } else {
-      recognitionDraftsRef.current.set(resultIndex, {
-        segmentId,
-        sourceText: cleanText,
-        committedPrefix,
-        lastUpdatedAt: now
-      });
-    }
-  }
-
-  function finalizeLiveDrafts() {
-    const draftIds = new Set(
-      Array.from(recognitionDraftsRef.current.values(), (draft) => draft.segmentId)
-    );
-    if (draftIds.size === 0) {
-      return;
-    }
-
-    recognitionDraftsRef.current.clear();
-    setLiveTranscript((segments) => segments.map((segment) => (
-      draftIds.has(segment.id) ? { ...segment, status: "saved" } : segment
-    )));
   }
 
   function startLiveRecognition() {
     const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!Recognition) {
-      setTranscriptMessage("이 브라우저는 실시간 음성 인식을 지원하지 않습니다. 녹음 후 STT 분석 또는 수동 문장 추가로 정리할 수 있습니다.");
+      const detail = "이 브라우저는 실시간 음성 인식을 지원하지 않습니다. 녹음 후 STT 분석 또는 수동 문장 추가로 정리할 수 있습니다.";
+      setTranscriptMessage(detail);
+      showFeedback("실시간 음성 인식을 사용할 수 없습니다", detail, "warning");
       return;
     }
 
@@ -535,29 +511,26 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
     recognition.continuous = true;
     recognition.interimResults = true;
     recognition.lang = "ko-KR";
-    recognition.maxAlternatives = 1;
     recognition.onresult = (event) => {
-      let finalizedCount = 0;
+      let text = "";
+      let isFinal = false;
       for (let index = event.resultIndex; index < event.results.length; index += 1) {
         const result = event.results[index];
         const alternative = result?.[0];
         if (alternative?.transcript) {
-          const isFinal = result?.isFinal === true;
-          upsertRecognitionDraft(index, alternative.transcript, isFinal);
-          if (isFinal) {
-            finalizedCount += 1;
-          }
+          text += alternative.transcript;
+          isFinal = isFinal || result?.isFinal === true;
         }
       }
-      setTranscriptMessage(finalizedCount > 0
-        ? `빠른 발화에서 확정된 문장 ${finalizedCount}개를 보존했습니다. 필요하면 바로 수정하세요.`
-        : "말하는 내용을 실시간 전사 초안으로 받고 있습니다.");
+      upsertLiveDraft(text, isFinal);
+      setTranscriptMessage(isFinal ? "확정된 전사 문장을 저장했습니다. 필요하면 바로 수정하세요." : "말하는 내용을 실시간 전사 초안으로 받고 있습니다.");
     };
     recognition.onerror = () => {
-      setTranscriptMessage("실시간 전사 중 오류가 발생했습니다. 녹음 파일은 계속 저장되며, 문장은 직접 추가할 수 있습니다.");
+      const detail = "실시간 전사 중 오류가 발생했습니다. 녹음 파일은 계속 저장되며, 문장은 직접 추가할 수 있습니다.";
+      setTranscriptMessage(detail);
+      showFeedback("실시간 전사를 계속할 수 없습니다", detail, "warning");
     };
     recognition.onend = () => {
-      finalizeLiveDrafts();
       if (recognitionShouldRunRef.current) {
         try {
           recognition.start();
@@ -580,401 +553,35 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
 
   function stopLiveRecognition() {
     recognitionShouldRunRef.current = false;
-    finalizeLiveDrafts();
     recognitionRef.current?.stop();
   }
 
-  function stopInputLevelMeter(resetLevel = true) {
-    if (levelAnimationFrameRef.current !== null) {
-      window.cancelAnimationFrame(levelAnimationFrameRef.current);
-      levelAnimationFrameRef.current = null;
-    }
-    const audioContext = audioContextRef.current;
-    audioContextRef.current = null;
-    if (audioContext && audioContext.state !== "closed") {
-      void audioContext.close().catch(() => undefined);
-    }
-    if (resetLevel) {
-      setLevel(0);
-    }
-  }
-
-  function startInputLevelMeter(stream: MediaStream) {
-    stopInputLevelMeter();
-    const AudioContextConstructor = window.AudioContext ?? window.webkitAudioContext;
-    if (!AudioContextConstructor) {
-      return;
-    }
-
-    try {
-      const audioContext = new AudioContextConstructor();
-      const source = audioContext.createMediaStreamSource(stream);
-      const analyser = audioContext.createAnalyser();
-      analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.72;
-      source.connect(analyser);
-      const samples = new Uint8Array(analyser.fftSize);
-      audioContextRef.current = audioContext;
-      void audioContext.resume().catch(() => undefined);
-
-      const updateLevel = () => {
-        analyser.getByteTimeDomainData(samples);
-        let sumSquares = 0;
-        for (const sample of samples) {
-          const normalized = (sample - 128) / 128;
-          sumSquares += normalized * normalized;
-        }
-        const rootMeanSquare = Math.sqrt(sumSquares / samples.length);
-        setLevel(Math.min(100, Math.round(rootMeanSquare * 360)));
-        levelAnimationFrameRef.current = window.requestAnimationFrame(updateLevel);
-      };
-      updateLevel();
-    } catch {
-      stopInputLevelMeter();
-    }
-  }
-
-  async function startRecording() {
-    if (!window.isSecureContext) {
-      setState("error");
-      setMessage("마이크 녹음은 HTTPS 또는 이 PC의 localhost 주소에서만 사용할 수 있습니다.");
-      return;
-    }
-
-    if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === "undefined") {
-      setState("error");
-      setMessage("이 브라우저에서는 마이크 녹음을 사용할 수 없습니다. 최신 Safari, Chrome 또는 Edge에서 다시 열어주세요.");
-      return;
-    }
-
-    const requestId = recordingRequestIdRef.current + 1;
-    recordingRequestIdRef.current = requestId;
-    let stream: MediaStream | null = null;
-
-    try {
-      setState("requesting");
-      setMessage("마이크 권한을 확인하고 있습니다. 브라우저 상단 또는 주소창의 마이크 허용을 눌러주세요.");
-      stream = await requestMicrophoneStream();
-      if (requestId !== recordingRequestIdRef.current) {
-        stream.getTracks().forEach((track) => track.stop());
-        return;
-      }
-      const activeStream = stream;
-      streamRef.current = activeStream;
-      const selectedMimeType = preferredRecordingMimeType();
-      const recorder = new MediaRecorder(activeStream, selectedMimeType ? { mimeType: selectedMimeType } : undefined);
-      const activeMimeType = recorder.mimeType || selectedMimeType || "audio/webm";
-      mediaRecorderRef.current = recorder;
-      recordedChunksRef.current = [];
-      recordingBlobRef.current = null;
-      localChunkStorageFailedRef.current = false;
-      if (recordingFileUrl) {
-        URL.revokeObjectURL(recordingFileUrl);
-      }
-      setRecordingFileUrl(null);
-      setRecordingFileName(recordingName(activeMimeType));
-      setRecordingFileSize(0);
-      setChunkCount(0);
-      setStoredBytes(0);
-      setUploadedChunks(0);
-      setUploadProgress(0);
-      setUploadState("idle");
-      elapsedSecondsRef.current = 0;
-      setElapsedSeconds(0);
-      recognitionDraftsRef.current.clear();
-      setLiveTranscript([]);
-      setWorkspaceView("transcript");
-      setTranscriptMessage("말하는 내용이 전사 초안으로 표시됩니다. 잘못된 문장은 바로 고칠 수 있습니다.");
-      setMessage(`${recordingExtension(activeMimeType).toUpperCase()} 형식으로 녹음 중입니다. 입력 레벨에서 마이크 반응을 확인할 수 있습니다.`);
-      startInputLevelMeter(activeStream);
-
-      recorder.ondataavailable = (event) => {
-        if (event.data.size === 0) {
-          return;
-        }
-
-        recordedChunksRef.current.push(event.data);
-        storeChunk(event.data)
-          .then((meta) => {
-            setChunkCount((value) => value + 1);
-            setStoredBytes((value) => value + meta.size);
-          })
-          .catch(() => {
-            if (!localChunkStorageFailedRef.current) {
-              localChunkStorageFailedRef.current = true;
-              if (recorder.state !== "inactive") {
-                setMessage("기기 임시 저장소를 사용할 수 없지만 녹음은 메모리에서 계속됩니다. 종료 후 바로 저장해 주세요.");
-              }
-            }
-          });
-      };
-      recorder.onerror = () => {
-        activeStream.getTracks().forEach((track) => track.stop());
-        stopLiveRecognition();
-        stopInputLevelMeter();
-        mediaRecorderRef.current = null;
-        streamRef.current = null;
-        setState("error");
-        setMessage("모바일 브라우저가 녹음을 중단했습니다. 화면을 켠 상태에서 마이크 권한을 확인한 뒤 다시 시도해 주세요.");
-      };
-      recorder.onstop = () => {
-        activeStream.getTracks().forEach((track) => track.stop());
-        stopLiveRecognition();
-        stopInputLevelMeter();
-        mediaRecorderRef.current = null;
-        streamRef.current = null;
-        setState("stopped");
-        const finalMimeType = recorder.mimeType || activeMimeType;
-        const recordingBlob = new Blob(recordedChunksRef.current, { type: finalMimeType });
-        if (recordingBlob.size > 0) {
-          const fileName = recordingName(finalMimeType);
-          recordingBlobRef.current = recordingBlob;
-          setRecordingFileName(fileName);
-          setRecordingFileSize(recordingBlob.size);
-          setRecordingFileUrl(URL.createObjectURL(recordingBlob));
-          setMessage(`녹음이 완료되었습니다. ${formatFileSize(recordingBlob.size)} · 아래 재생 버튼으로 실제 음성을 확인할 수 있습니다.`);
-        } else {
-          recordingBlobRef.current = null;
-          setRecordingFileSize(0);
-          setMessage("녹음 데이터가 만들어지지 않았습니다. 마이크 권한을 다시 허용하고 화면을 켠 상태에서 재시도해 주세요.");
-        }
-      };
-      activeStream.getAudioTracks().forEach((track) => {
-        track.addEventListener("ended", () => {
-          if (mediaRecorderRef.current === recorder && recorder.state !== "inactive") {
-            recorder.stop();
-          }
-        }, { once: true });
-      });
-      recorder.start(1000);
-      startLiveRecognition();
-      setState("recording");
-    } catch (error) {
-      stream?.getTracks().forEach((track) => track.stop());
-      stopInputLevelMeter();
-      if (requestId !== recordingRequestIdRef.current) {
-        return;
-      }
-      setState("error");
-      setMessage(microphoneErrorMessage(error));
-    }
-  }
-
-  function cancelRecordingRequest() {
-    recordingRequestIdRef.current += 1;
-    setState("idle");
-    setMessage("마이크 권한 요청을 취소했습니다. 준비되면 녹음 시작을 다시 눌러주세요.");
-  }
-
-  function pauseRecording() {
-    if (mediaRecorderRef.current?.state === "recording") {
-      mediaRecorderRef.current.pause();
-      stopLiveRecognition();
-      stopInputLevelMeter();
-      setState("paused");
-      setMessage("녹음을 일시 중지했습니다. 재개하면 같은 세션에 이어서 저장됩니다.");
-    }
-  }
-
-  function resumeRecording() {
-    if (mediaRecorderRef.current?.state === "paused") {
-      mediaRecorderRef.current.resume();
-      if (streamRef.current) {
-        startInputLevelMeter(streamRef.current);
-      }
-      startLiveRecognition();
-      setState("recording");
-      setMessage("녹음을 재개했습니다.");
-    }
-  }
-
-  function stopRecording() {
-    const recorder = mediaRecorderRef.current;
-    if (recorder && recorder.state !== "inactive") {
-      setMessage("녹음 파일을 마무리하고 있습니다.");
-      try {
-        recorder.requestData();
-      } catch {
-        // Some mobile implementations flush only when stop() is called.
-      }
-      recorder.stop();
-    }
-  }
-
-  async function saveRecordingToDevice() {
-    const recordingBlob = recordingBlobRef.current;
-    if (!recordingBlob || !recordingFileUrl) {
-      setMessage("저장할 녹음 파일이 없습니다.");
-      return;
-    }
-
-    const file = new File([recordingBlob], recordingFileName, { type: recordingBlob.type });
-    const shareData = { title: "회의 녹음", files: [file] };
-    if (typeof navigator.share === "function" && navigator.canShare?.(shareData)) {
-      try {
-        await navigator.share(shareData);
-        setMessage("모바일 기기의 공유·파일 저장 화면을 열었습니다.");
-        return;
-      } catch (error) {
-        if (error instanceof DOMException && error.name === "AbortError") {
-          return;
-        }
-      }
-    }
-
-    const download = document.createElement("a");
-    download.href = recordingFileUrl;
-    download.download = recordingFileName;
-    download.click();
-    setMessage("녹음 파일 저장을 시작했습니다.");
-  }
-
-  function analyzeLatestRecording() {
-    const recordingBlob = recordingBlobRef.current;
-    if (!recordingBlob) {
-      setAudioImportMessage("분석할 방금 녹음 파일이 없습니다.");
-      return;
-    }
-    void analyzeExistingAudioFile(new File([recordingBlob], recordingFileName, { type: recordingBlob.type }));
-  }
-
-  async function confirmLocalChunks() {
-    const chunks = await readPendingChunks();
-    if (chunks.length === 0) {
-      setUploadState("complete");
-      setUploadProgress(100);
-      setMessage("로컬에 보관할 대기 음성 청크가 없습니다. 서버에는 전사 TXT와 회의록만 저장합니다.");
-      return;
-    }
-
-    setUploadState("uploading");
-    setMessage("원본 음성 청크를 이 기기의 IndexedDB에만 보관하도록 확인합니다.");
-    let uploaded = 0;
-
-    try {
-      for (const chunk of chunks) {
-        await markChunkUploaded(chunk);
-        uploaded += 1;
-        setUploadedChunks((value) => value + 1);
-        setUploadProgress(Math.round((uploaded / chunks.length) * 100));
-      }
-
-      setUploadState("complete");
-      setMessage("원본 음성은 이 기기에만 보관됩니다. 서버에는 확인한 전사 TXT와 AI 분석 보고서만 저장하세요.");
-    } catch (error) {
-      void error;
-      setUploadState("failed");
-      setMessage("로컬 음성 보관 상태 확인에 실패했습니다. 브라우저 저장 공간을 확인한 뒤 다시 시도해 주세요.");
-    }
-  }
-
-  async function deleteLocalAudio() {
-    try {
-      await deleteLocalChunks();
-      setChunkCount(0);
-      setStoredBytes(0);
-      setUploadedChunks(0);
-      setUploadProgress(0);
-      setUploadState("idle");
-      setMessage("이 기기에 임시 보관된 원본 음성 청크를 삭제했습니다. 서버의 전사 TXT와 AI 분석 보고서는 유지됩니다.");
-    } catch (error) {
-      void error;
-      setUploadState("failed");
-      setMessage("로컬 원본 음성 삭제에 실패했습니다. 브라우저 저장소 권한을 확인해 주세요.");
-    }
-  }
-
-  function changeParticipantCount(count: number) {
-    const nextCount = Math.min(8, Math.max(1, count));
-    const nextParticipants = Array.from({ length: nextCount }, (_, index) => (
-      participants[index] ?? { id: `speaker-${index + 1}`, name: `화자 ${index + 1}` }
-    ));
-    participantsRef.current = nextParticipants;
-    setParticipants(nextParticipants);
-    if (!nextParticipants.some((participant) => participant.id === activeParticipantIdRef.current)) {
-      const nextActiveId = nextParticipants[0]?.id ?? "speaker-1";
-      activeParticipantIdRef.current = nextActiveId;
-      setActiveParticipantId(nextActiveId);
-    }
-  }
-
-  function updateParticipantName(participantId: string, name: string) {
-    setParticipants((currentParticipants) => {
-      const nextParticipants = currentParticipants.map((participant) => (
-        participant.id === participantId ? { ...participant, name } : participant
-      ));
-      participantsRef.current = nextParticipants;
-      return nextParticipants;
-    });
-    setLiveTranscript((segments) => segments.map((segment) => (
-      segment.speakerId === participantId ? { ...segment, speaker: name } : segment
-    )));
-  }
-
-  function selectActiveParticipant(participantId: string) {
-    if (participantId === activeParticipantIdRef.current) {
-      return;
-    }
-    finalizeLiveDrafts();
-    activeParticipantIdRef.current = participantId;
-    setActiveParticipantId(participantId);
-    if (mediaRecorderRef.current?.state === "recording" && recognitionRef.current) {
-      const previousRecognition = recognitionRef.current;
-      recognitionShouldRunRef.current = false;
-      previousRecognition.onresult = null;
-      previousRecognition.onerror = null;
-      previousRecognition.onend = null;
-      previousRecognition.stop();
-      recognitionRef.current = null;
-      window.setTimeout(() => {
-        if (mediaRecorderRef.current?.state === "recording") {
-          startLiveRecognition();
-        }
-      }, 120);
-    }
-  }
-
-  function assignTranscriptSpeaker(segmentId: string, participantId: string) {
-    const speaker = participantsRef.current.find((participant) => participant.id === participantId)?.name.trim() || "화자";
-    setLiveTranscript((segments) => segments.map((segment) => (
-      segment.id === segmentId ? { ...segment, speakerId: participantId, speaker, status: "draft" } : segment
-    )));
-  }
-
   function addManualTranscriptSegment() {
-    const speakerId = activeParticipantIdRef.current;
-    const speaker = participantsRef.current.find((participant) => participant.id === speakerId)?.name.trim() || "화자";
+    transcriptUserEditedRef.current = true;
     setLiveTranscript((segments) => [...segments.filter((segment) => segment.id !== "intro"), {
       id: `segment-${Date.now()}-${Math.random().toString(16).slice(2)}`,
-      timecode: formatElapsed(elapsedSecondsRef.current),
-      speakerId,
-      speaker,
+      timecode: formatElapsed(elapsedSeconds),
+      speaker: "화자 A",
       rawText: "새 전사 문장을 입력하세요.",
+      normalizedText: "새 전사 문장을 입력하세요.",
       text: "새 전사 문장을 입력하세요.",
-      status: "draft"
+      status: "draft",
+      source: "MANUAL",
+      confidence: 0.99,
+      overlapSeverity: null,
+      speakerStatus: "UNCONFIRMED"
     }]);
     setTranscriptMessage("새 문장을 추가했습니다. 내용을 수정한 뒤 저장하세요.");
   }
 
-  function updateTranscriptSegment(id: string, text: string) {
-    setLiveTranscript((segments) => segments.map((segment) => (
-      segment.id === id ? { ...segment, text, status: "draft" } : segment
-    )));
-  }
+  const updateReviewSegments = useCallback((segments: TranscriptEditorSegment[]) => {
+    transcriptUserEditedRef.current = true;
+    setLiveTranscript(segments.map((segment) => ({ ...segment, status: "draft" })));
+  }, []);
 
   function deleteTranscriptSegment(id: string) {
-    setLiveTranscript((segments) => {
-      const nextSegments = segments.filter((segment) => segment.id !== id);
-      if (nextSegments.length > 0) {
-        return nextSegments;
-      }
-      const firstParticipant = participantsRef.current[0] ?? defaultParticipants[0];
-      return [{
-        ...initialLiveTranscript[0]!,
-        speakerId: firstParticipant?.id ?? "speaker-1",
-        speaker: firstParticipant?.name.trim() || "화자 1"
-      }];
-    });
+    transcriptUserEditedRef.current = true;
+    setLiveTranscript((segments) => segments.filter((segment) => segment.id !== id));
     setTranscriptMessage("선택한 전사 문장을 삭제했습니다.");
   }
 
@@ -984,99 +591,174 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       .map((segment, sequence) => {
         const startMs = timecodeToMs(segment.timecode);
         return {
-          clientId: segment.id,
           sequence,
           speakerLabel: segment.speaker,
           startMs,
           endMs: startMs + 5000,
-          rawText: segment.rawText,
           editedText: segment.text.trim(),
-          source: segment.rawText === "새 전사 문장을 입력하세요." ? "MANUAL" : "LIVE",
-          status: "CONFIRMED"
+          source: segment.source
         };
       });
 
     if (!meetingId) {
-      setLiveTranscript((segments) => segments.map((segment) => ({ ...segment, status: "saved" })));
-      setTranscriptMessage("회의를 먼저 생성하면 전사 문장을 DB에 저장할 수 있습니다. 현재는 화면 초안으로만 저장했습니다.");
+      const detail = "회의를 먼저 생성하면 전사 문장을 DB에 저장할 수 있습니다. 현재 내용은 화면 초안으로만 남아 있습니다.";
+      setTranscriptMessage(detail);
+      showFeedback("회의 정보가 필요합니다", detail, "warning");
       return;
     }
 
     if (segmentsToSave.length === 0) {
-      setTranscriptMessage("저장할 전사 문장이 없습니다. 문장을 추가하거나 실시간 전사를 받은 뒤 저장하세요.");
+      const detail = "저장할 전사 문장이 없습니다. 문장을 추가하거나 실시간 전사를 받은 뒤 저장해 주세요.";
+      setTranscriptMessage(detail);
+      showFeedback("전사 문장을 확인해 주세요", detail, "warning");
       return;
     }
 
-    const response = await fetch("/api/transcripts/segments", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        meetingId,
-        segments: segmentsToSave
-      })
-    });
+    try {
+      const requestBody = JSON.stringify({ version: transcriptVersion ?? 0, segments: segmentsToSave });
+      if (transcriptMutationRef.current?.payload !== requestBody) {
+        transcriptMutationRef.current = { payload: requestBody, key: createMutationIdempotencyKey("transcript") };
+      }
+      const payload = await meetingApiRequest<{ transcript: ServerTranscript }>(`/api/meetings/${encodeURIComponent(meetingId)}/transcript`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": transcriptMutationRef.current.key
+        },
+        body: requestBody
+      }, { retryCount: 1 });
+      transcriptMutationRef.current = null;
+      applyServerTranscript(payload.transcript);
+      const detail = `최종 전사 ${segmentsToSave.length}개 문장을 v${payload.transcript.version}으로 서버에 확정 저장했습니다.`;
+      setTranscriptMessage(detail);
+      showFeedback("최종 전사 저장 완료", detail, "info");
+    } catch (error) {
+      if (error instanceof MeetingApiClientError) {
+        if (error.status > 0 && error.status < 500) transcriptMutationRef.current = null;
+        const detail = apiFailureMessage(error.payload, error.status === 0
+          ? "네트워크 연결 후 같은 요청을 다시 시도해 주세요."
+          : "최종 전사 확정에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+        setTranscriptMessage(detail);
+        showFeedback(error.status === 409 ? "다른 수정 내용이 먼저 저장되었습니다" : error.status === 0 ? "오프라인 또는 연결 오류" : "최종 전사를 저장하지 못했습니다", detail,
+          error.status === 409 || error.status === 0 ? "warning" : "error");
+        return;
+      }
+      const detail = "서버에 연결할 수 없습니다. 네트워크와 서버 실행 상태를 확인해 주세요.";
+      setTranscriptMessage(detail);
+      showFeedback("서버 연결 오류", detail);
+    }
+  }
 
-    if (!response.ok) {
-      setTranscriptMessage("전사 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+  async function downloadTranscript() {
+    if (!meetingId || transcriptVersion === null) {
+      showFeedback("다운로드할 전사가 없습니다", "최종 전사를 먼저 서버에 확정 저장해 주세요.", "warning");
       return;
     }
+    try {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/transcript.txt`);
+      if (!response.ok) {
+        const payload = await response.json().catch(() => null) as ApiErrorPayload | null;
+        showFeedback("전사 TXT를 다운로드하지 못했습니다", apiFailureMessage(payload, "서버 저장본을 확인해 주세요."));
+        return;
+      }
+      const blob = await response.blob();
+      const url = URL.createObjectURL(blob);
+      const anchor = document.createElement("a");
+      anchor.href = url;
+      anchor.download = `${meetingId}-transcript-v${transcriptVersion}.txt`;
+      anchor.click();
+      URL.revokeObjectURL(url);
+    } catch {
+      showFeedback("전사 TXT 다운로드 오류", "서버에 연결할 수 없습니다. 네트워크와 서버 상태를 확인해 주세요.");
+    }
+  }
 
-    setLiveTranscript((segments) => segments.map((segment) => ({ ...segment, status: "saved" })));
-    setTranscriptMessage(`전사 문장 ${segmentsToSave.length}개를 회의에 저장했습니다. 이후 요약과 할 일 추출의 기준 문장으로 사용할 수 있습니다.`);
+  function requestServerReload() {
+    if (transcriptUserEditedRef.current) {
+      setConfirmServerReload(true);
+      return;
+    }
+    void loadServerTranscript(true);
   }
 
   async function generateMinutesDraft() {
     if (!meetingId) {
-      setMinutesMessage("회의를 먼저 생성하고 전사 TXT를 저장한 뒤 AI 분석 보고서를 만들 수 있습니다.");
+      const detail = "회의를 먼저 생성하고 전사 TXT를 저장한 뒤 AI 분석 보고서를 만들 수 있습니다.";
+      setMinutesMessage(detail);
+      showFeedback("회의 정보가 필요합니다", detail, "warning");
+      return;
+    }
+    if (analysisMode === "gemini" && !geminiConsentConfirmed) {
+      const detail = "확정 전사 TXT가 Google Gemini API로 전송된다는 안내를 확인하고 동의해 주세요.";
+      setMinutesMessage(detail);
+      showFeedback("외부 AI 전송 동의가 필요합니다", detail, "warning");
       return;
     }
 
     setIsGeneratingMinutes(true);
     setMinutesMessage(analysisMode === "ollama"
-      ? "로컬 AI가 현재 화면의 전사 TXT를 분석하고 있습니다."
-      : "Gemini가 현재 화면의 전사 TXT를 분석하고 있습니다.");
+      ? "로컬 AI가 저장된 전사 TXT를 분석하고 있습니다."
+      : "Gemini가 저장된 전사 TXT를 분석하고 있습니다.");
     try {
-      const response = await fetch("/api/minutes/generate", {
+      const response = await fetch(`/api/meetings/${encodeURIComponent(meetingId)}/minutes/generate`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          meetingId,
           provider: analysisMode,
-          fallbackSegments: liveTranscript
-            .filter((segment) => segment.id !== "intro" && segment.text.trim().length > 0)
-            .map((segment, sequence) => {
-              const startMs = timecodeToMs(segment.timecode);
-              return {
-                clientId: segment.id,
-                sequence,
-                speakerLabel: segment.speaker,
-                startMs,
-                endMs: startMs + 5000,
-                rawText: segment.rawText,
-                editedText: segment.text.trim(),
-                source: segment.rawText === "새 전사 문장을 입력하세요." ? "MANUAL" : "LIVE",
-                status: "CONFIRMED"
-              };
-            })
+          ...(analysisMode === "gemini" ? {
+            externalAiConsent: true,
+            consentId: createMutationIdempotencyKey("external-ai-consent")
+          } : {})
         })
       });
 
-      if (response.status === 409) {
-        setMinutesMessage("현재 화면에 분석할 전사 TXT가 없습니다. 문장을 추가하거나 녹음 전사를 받은 뒤 다시 시도해 주세요.");
-        return;
-      }
       if (!response.ok) {
-        const errorPayload = await response.json().catch(() => null) as { message?: string } | null;
-        setMinutesMessage(errorPayload?.message ?? "AI 분석 보고서 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+        const errorPayload = await response.json().catch(() => null) as ApiErrorPayload | null;
+        const detail = apiFailureMessage(errorPayload, "AI 분석 보고서 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+        setMinutesMessage(detail);
+        showFeedback(errorPayload?.error === "TRANSCRIPT_REQUIRED" ? "최종 전사가 필요합니다" : "AI 보고서를 생성하지 못했습니다", detail,
+          response.status === 409 ? "warning" : "error");
         return;
       }
 
-      const payload = await response.json() as {
-        minutes: MinutesDraft;
-        provider: { kind: "mock" | AiAnalysisMode; model: string };
-        analysisInput: { source: "CURRENT_TRANSCRIPT" | "SAVED_TRANSCRIPT"; segmentCount: number };
+      type GenerationResponse = {
+        status: "GENERATED" | "QUEUED" | "PROCESSING" | "FAILED";
+        minutes?: MinutesDraft;
+        provider?: { kind: "mock" | AiAnalysisMode; model: string };
+        job?: { id: string };
       };
-      setMinutesDraft(payload.minutes);
+      let payload = await response.json() as GenerationResponse;
+      if (payload.status === "QUEUED" && payload.job?.id) {
+        setMinutesMessage("분석 작업을 Queue에 등록했습니다. worker 처리 결과를 기다리고 있습니다.");
+        const deadline = Date.now() + 180_000;
+        while (Date.now() < deadline) {
+          await new Promise((resolve) => window.setTimeout(resolve, 1_000));
+          const statusResponse = await fetch(
+            `/api/meetings/${encodeURIComponent(meetingId)}/minutes/generate?jobId=${encodeURIComponent(payload.job.id)}`,
+            { cache: "no-store" }
+          );
+          const statusPayload = await statusResponse.json().catch(() => null) as (GenerationResponse & ApiErrorPayload) | null;
+          if (!statusResponse.ok || statusPayload?.status === "FAILED") {
+            const detail = apiFailureMessage(statusPayload, "worker가 AI 분석 작업을 완료하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+            setMinutesMessage(detail);
+            showFeedback("AI 분석 작업 실패", detail, "error");
+            return;
+          }
+          if (statusPayload?.status === "GENERATED" && statusPayload.minutes) {
+            payload = statusPayload;
+            break;
+          }
+        }
+        if (!payload.minutes || !payload.provider) {
+          const detail = "AI 분석 대기 시간이 초과되었습니다. Queue 상태를 확인한 뒤 다시 시도해 주세요.";
+          setMinutesMessage(detail);
+          showFeedback("AI 분석 대기 시간 초과", detail, "warning");
+          return;
+        }
+      }
+      if (!payload.minutes || !payload.provider) throw new Error("AI_RESPONSE_INVALID");
+      minutesUserEditedRef.current = true;
+      setMinutesDraft({ ...payload.minutes, version: minutesSavedVersion ?? 0 });
       setWorkspaceView("minutes");
       window.requestAnimationFrame(() => {
         if (document.activeElement instanceof HTMLElement) {
@@ -1091,91 +773,13 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
         : payload.provider.kind === "ollama"
           ? "로컬 AI"
           : "테스트 분석기";
-      setMinutesMessage(`${providerLabel} (${payload.provider.model})가 전사 TXT를 분석해 보고서를 생성했습니다. 현재 화면 TXT ${payload.analysisInput.segmentCount}개를 사용했습니다.`);
+      setMinutesMessage(`${providerLabel} (${payload.provider.model})가 전사 TXT를 분석해 보고서를 생성했습니다.`);
     } catch {
-      setMinutesMessage("AI 분석 서버에 연결하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.");
+      const detail = "AI 분석 서버에 연결하지 못했습니다. 연결 상태를 확인한 뒤 다시 시도해 주세요.";
+      setMinutesMessage(detail);
+      showFeedback("AI 연결 오류", detail);
     } finally {
       setIsGeneratingMinutes(false);
-    }
-  }
-
-  async function analyzeExistingAudioFile(file: File) {
-    if (!meetingId) {
-      setAudioImportMessage("회의를 먼저 만든 뒤 기존 녹음 파일을 분석할 수 있습니다.");
-      return;
-    }
-    if (file.size === 0) {
-      setAudioImportMessage("선택한 녹음 파일이 비어 있습니다.");
-      return;
-    }
-    if (file.size > maxInlineAudioBytes) {
-      setAudioImportMessage("녹음 파일은 최대 14MB까지 분석할 수 있습니다.");
-      return;
-    }
-
-    setIsAnalyzingAudioFile(true);
-    setAudioImportMessage(`${file.name}에서 음성과 화자를 분석하고 있습니다.`);
-    setMinutesMessage("기존 녹음 파일을 전사한 뒤 Gemini가 AI 보고서를 만들고 있습니다.");
-    try {
-      const formData = new FormData();
-      formData.append("audio", file);
-      formData.append("meetingId", meetingId);
-      formData.append("participantNames", JSON.stringify(
-        participantsRef.current.map((participant) => participant.name.trim()).filter(Boolean)
-      ));
-
-      const response = await fetch("/api/recordings/analyze-file", {
-        method: "POST",
-        body: formData
-      });
-      if (!response.ok) {
-        const errorPayload = await response.json().catch(() => null) as { message?: string } | null;
-        const errorMessage = errorPayload?.message ?? "녹음 파일 AI 분석에 실패했습니다. 잠시 후 다시 시도해 주세요.";
-        setAudioImportMessage(errorMessage);
-        setMinutesMessage(errorMessage);
-        return;
-      }
-
-      const payload = await response.json() as ImportedAudioAnalysis;
-      const speakerLabels = Array.from(new Set(
-        payload.transcript.map((segment) => segment.speakerLabel.trim()).filter(Boolean)
-      )).slice(0, 8);
-      const importedParticipants: ParticipantProfile[] = (speakerLabels.length > 0 ? speakerLabels : ["화자 1"])
-        .map((name, index) => ({ id: `speaker-${index + 1}`, name }));
-      const speakerIds = new Map(importedParticipants.map((participant) => [participant.name, participant.id]));
-      const fallbackParticipant = importedParticipants[0] ?? defaultParticipants[0]!;
-      const importedTranscript: LiveTranscriptSegment[] = payload.transcript.map((segment) => ({
-        id: segment.id,
-        timecode: formatElapsed(Math.floor(segment.startMs / 1000)),
-        speakerId: speakerIds.get(segment.speakerLabel) ?? fallbackParticipant.id,
-        speaker: segment.speakerLabel,
-        rawText: segment.rawText,
-        text: segment.editedText,
-        status: "saved"
-      }));
-
-      participantsRef.current = importedParticipants;
-      setParticipants(importedParticipants);
-      activeParticipantIdRef.current = fallbackParticipant.id;
-      setActiveParticipantId(fallbackParticipant.id);
-      setLiveTranscript(importedTranscript);
-      setTranscriptMessage(`녹음 파일에서 전사 문장 ${payload.analysisInput.segmentCount}개를 생성해 회의에 저장했습니다.`);
-      setMinutesDraft(payload.minutes);
-      if (payload.provider.kind === "gemini") {
-        setAnalysisMode("gemini");
-      }
-      setWorkspaceView("minutes");
-      setFinalRecordMessage("AI 분석 보고서를 검토하고 수정한 뒤 최종 서버 저장 기록을 남겨주세요.");
-      setAudioImportMessage(`${payload.file.name} · TXT ${payload.analysisInput.segmentCount}개 · 원본 파일은 서버에 저장하지 않았습니다. AI 분석 중 Gemini로만 전송했습니다.`);
-      const providerLabel = payload.provider.kind === "gemini" ? "Gemini" : "테스트 분석기";
-      setMinutesMessage(`${payload.file.name}에서 전사 TXT ${payload.analysisInput.segmentCount}개를 만들고 ${providerLabel} (${payload.provider.model})가 보고서를 생성했습니다.`);
-      window.requestAnimationFrame(() => minutesPaneRef.current?.scrollTo({ top: 0 }));
-    } catch {
-      const errorMessage = "녹음 파일 분석 서버에 연결하지 못했습니다. 연결 상태를 확인해 주세요.";
-      setAudioImportMessage(errorMessage);
-      setMinutesMessage(errorMessage);
-    } finally {
-      setIsAnalyzingAudioFile(false);
     }
   }
 
@@ -1186,12 +790,23 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       setAiStatus(status);
       setAiStatusMessage("AI 연결 상태를 확인했습니다.");
     } catch {
-      setAiStatusMessage("AI 연결 상태를 확인하지 못했습니다.");
+      const detail = "AI 연결 상태를 확인하지 못했습니다. Ollama 또는 Gemini 설정을 확인해 주세요.";
+      setAiStatusMessage(detail);
+      showFeedback("AI 상태 확인 실패", detail, "warning");
     }
   }
 
   function updateMinutesDraft<K extends keyof MinutesDraft>(key: K, value: MinutesDraft[K]) {
+    minutesUserEditedRef.current = true;
     setMinutesDraft((draft) => draft ? { ...draft, [key]: value } : draft);
+  }
+
+  function requestMinutesReload() {
+    if (minutesUserEditedRef.current) {
+      setConfirmMinutesReload(true);
+      return;
+    }
+    void loadServerMinutes(true);
   }
 
   function splitLines(value: string): string[] {
@@ -1200,30 +815,60 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
 
   async function finalizeMinutesDraft() {
     if (!meetingId || !minutesDraft) {
-      setFinalRecordMessage("AI 분석 보고서를 먼저 생성한 뒤 최종 서버 저장 기록을 남길 수 있습니다.");
+      const detail = "AI 회의록을 먼저 생성한 뒤 최종 확정할 수 있습니다.";
+      setFinalRecordMessage(detail);
+      showFeedback("확정할 회의록이 없습니다", detail, "warning");
+      return;
+    }
+
+    if (reviewDecisionBlockers > 0) {
+      const detail = `결정 후보 ${reviewDecisionBlockers}건의 화자 또는 근거 검토가 끝나지 않았습니다. 전사 화면의 추출 항목·근거 검토에서 확인해 주세요.`;
+      setFinalRecordMessage(detail);
+      setWorkspaceView("transcript");
+      showFeedback("중요 결정 검토가 필요합니다", detail, "warning");
       return;
     }
 
     setIsFinalizingMinutes(true);
-    setFinalRecordMessage("수정한 AI 분석 보고서를 최종 기록으로 서버에 저장합니다.");
+    setFinalRecordMessage("수정한 회의록을 최종 확정하여 서버에 저장합니다.");
     try {
-      const response = await fetch("/api/minutes/finalize", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          meetingId,
-          ...minutesDraft
-        })
+      const requestBody = JSON.stringify({
+        ...minutesDraft,
+        version: minutesSavedVersion ?? 0
       });
-
-      if (!response.ok) {
-        setFinalRecordMessage("최종 서버 저장 기록을 남기지 못했습니다. 잠시 후 다시 시도해 주세요.");
+      if (minutesMutationRef.current?.payload !== requestBody) {
+        minutesMutationRef.current = { payload: requestBody, key: createMutationIdempotencyKey("minutes") };
+      }
+      const payload = await meetingApiRequest<{ minutes: MinutesDraft }>(`/api/meetings/${encodeURIComponent(meetingId)}/minutes`, {
+        method: "PUT",
+        headers: {
+          "Content-Type": "application/json",
+          "Idempotency-Key": minutesMutationRef.current.key
+        },
+        body: requestBody
+      }, { retryCount: 1 });
+      minutesMutationRef.current = null;
+      setMinutesDraft(payload.minutes);
+      setMinutesSavedVersion(payload.minutes.version);
+      setMinutesUpdatedAt(payload.minutes.updatedAt);
+      minutesUserEditedRef.current = false;
+      const detail = `회의록을 v${payload.minutes.version}으로 최종 확정했습니다. 서버에는 최종 전사 TXT와 확정 회의록만 저장됩니다.`;
+      setFinalRecordMessage(detail);
+      showFeedback("회의록 저장 완료", detail, "info");
+    } catch (error) {
+      if (error instanceof MeetingApiClientError) {
+        if (error.status > 0 && error.status < 500) minutesMutationRef.current = null;
+        const detail = apiFailureMessage(error.payload, error.status === 0
+          ? "네트워크 연결 후 같은 요청을 다시 시도해 주세요."
+          : "회의록을 최종 확정하지 못했습니다. 잠시 후 다시 시도해 주세요.");
+        setFinalRecordMessage(detail);
+        showFeedback(error.status === 409 ? "다른 수정 내용이 먼저 저장되었습니다" : error.status === 0 ? "오프라인 또는 연결 오류" : "회의록을 저장하지 못했습니다", detail,
+          error.status === 409 || error.status === 0 ? "warning" : "error");
         return;
       }
-
-      const payload = await response.json() as { minutes: MinutesDraft };
-      setMinutesDraft(payload.minutes);
-      setFinalRecordMessage("최종 서버 저장 기록을 남겼습니다. 서버에는 전사 TXT와 확정 회의록만 저장됩니다.");
+      const detail = "서버에 연결할 수 없어 회의록을 저장하지 못했습니다. 서버 상태를 확인해 주세요.";
+      setFinalRecordMessage(detail);
+      showFeedback("서버 연결 오류", detail);
     } finally {
       setIsFinalizingMinutes(false);
     }
@@ -1233,13 +878,37 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
   const canPause = state === "recording";
   const canResume = state === "paused";
   const canStop = state === "recording" || state === "paused";
-  const canChangeParticipantCount = state === "idle" && liveTranscript.every((segment) => segment.id === "intro");
-  const visibleTranscript = [...liveTranscript].reverse();
-  const participantSummary = participants
-    .map((participant, index) => participant.name.trim() || `화자 ${index + 1}`)
-    .join(", ");
-  const selectedAiStatus = aiStatus?.[analysisMode] ?? null;
-  const analysisAvailable = aiStatus?.activeProvider === "mock" || selectedAiStatus?.available === true;
+  const visibleTranscript = liveTranscript;
+
+  const playTranscriptSegment = useCallback((timecode: string, repeat: boolean) => {
+    const audio = recordingAudioRef.current;
+    if (!audio) {
+      showFeedback("재생할 녹음이 없습니다", "이 브라우저에서 녹음을 완료한 뒤 구간 재생을 사용할 수 있습니다.", "warning");
+      return;
+    }
+    if (recordingRepeatTimerRef.current !== null) {
+      window.clearTimeout(recordingRepeatTimerRef.current);
+      recordingRepeatTimerRef.current = null;
+    }
+    const start = timecodeToMs(timecode) / 1000;
+    const play = () => {
+      audio.currentTime = Math.min(start, Number.isFinite(audio.duration) ? audio.duration : start);
+      void audio.play();
+      recordingRepeatTimerRef.current = window.setTimeout(() => {
+        audio.pause();
+        if (repeat) play();
+      }, 5000);
+    };
+    play();
+  }, [showFeedback]);
+
+  useEffect(() => () => {
+    if (recordingRepeatTimerRef.current !== null) window.clearTimeout(recordingRepeatTimerRef.current);
+  }, []);
+  const selectedAiStatus = aiStatus
+    ? aiStatus.activeProvider === "mock" ? aiStatus.mock : aiStatus[analysisMode]
+    : null;
+  const analysisAvailable = selectedAiStatus?.available === true;
   const recordingStatus = state === "requesting"
     ? "마이크 권한 확인 중"
     : state === "recording"
@@ -1253,16 +922,73 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             : "녹음 대기";
 
   return (
-    <section className="recorder-panel" aria-label="브라우저 녹음">
+    <>
+      <FeedbackDialog
+        open={feedback !== null}
+        title={feedback?.title ?? ""}
+        message={feedback?.message ?? ""}
+        tone={feedback?.tone ?? "error"}
+        onClose={() => setFeedback(null)}
+      />
+      <FeedbackDialog
+        open={confirmServerReload}
+        title="서버 저장본으로 다시 불러올까요?"
+        message="화면에서 수정 중인 내용은 사라지고 서버에 마지막으로 저장된 최종 전사로 바뀝니다."
+        tone="warning"
+        confirmLabel="서버 저장본 불러오기"
+        cancelLabel="취소"
+        onClose={() => setConfirmServerReload(false)}
+        onConfirm={() => {
+          setConfirmServerReload(false);
+          void loadServerTranscript(true);
+        }}
+      />
+      <FeedbackDialog
+        open={confirmMinutesReload}
+        title="저장된 회의록을 다시 불러올까요?"
+        message="화면에서 생성하거나 수정 중인 회의록은 사라지고 서버에 마지막으로 저장된 최종 회의록으로 바뀝니다."
+        tone="warning"
+        confirmLabel="저장본 불러오기"
+        cancelLabel="취소"
+        onClose={() => setConfirmMinutesReload(false)}
+        onConfirm={() => {
+          setConfirmMinutesReload(false);
+          void loadServerMinutes(true);
+        }}
+      />
+      <section className="recorder-panel" aria-label="브라우저 녹음">
       <div className="recorder-status">
-        <strong>{recordingStatus}</strong>
+        <div className="recorder-status-label">
+          <strong>{recordingStatus}</strong>
+          <span className={`network-status ${networkState}`} role="status">
+            <span aria-hidden="true" />{networkState === "online" ? "온라인" : "오프라인 · 로컬 저장"}
+          </span>
+        </div>
         <span>{formatElapsed(elapsedSeconds)}</span>
       </div>
-      <div className="level-meter" aria-label={`입력 레벨 ${level}%`}>
-        <span style={{ width: `${level}%` }} />
-      </div>
+      <AudioQualityPanel
+        level={level}
+        inputTestState={inputTestState}
+        inputTestRemainingMs={inputTestRemainingMs}
+        inputTestReport={inputTestReport}
+        recordingQualityReport={recordingQualityReport}
+        qualityMessage={qualityMessage}
+        isAnalyzingQuality={isAnalyzingQuality}
+        disabled={state === "requesting" || state === "recording" || state === "paused"}
+        onRunInputTest={() => void runInputTest()}
+      />
+      <label className="check-row recording-consent-check">
+        <input
+          type="checkbox"
+          aria-label="녹음 및 브라우저 보관 동의"
+          checked={recordingConsentConfirmed}
+          onChange={(event) => setRecordingConsentConfirmed(event.target.checked)}
+          disabled={!canStart}
+        />
+        <span>참석자에게 녹음 사실을 알렸으며, 원본 음성이 서버가 아닌 이 브라우저에만 보관되는 것에 동의했습니다.</span>
+      </label>
       <div className="toolbar recording-controls" aria-label="브라우저 녹음 제어">
-        <button className="button" type="button" onClick={startRecording} disabled={!canStart}>
+        <button className="button" type="button" onClick={() => void startRecordingWithConsent()} disabled={!canStart}>
           {state === "requesting" ? "권한 확인 중" : "녹음 시작"}
         </button>
         <button className="button secondary" type="button" onClick={pauseRecording} disabled={!canPause}>일시 중지</button>
@@ -1277,81 +1003,14 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
       ) : null}
       {recordingFileUrl ? (
         <div className="recording-result" aria-label="완료된 녹음">
-          <audio aria-label="녹음 재생 확인" controls preload="metadata" src={recordingFileUrl} />
+          <audio ref={recordingAudioRef} aria-label="녹음 재생 확인" controls preload="metadata" src={recordingFileUrl} />
           <div className="recording-result-actions">
-            <button className="button secondary" type="button" onClick={saveRecordingToDevice}>녹음 파일 저장</button>
-            <button
-              className="button"
-              type="button"
-              onClick={analyzeLatestRecording}
-              disabled={isAnalyzingAudioFile || isGeneratingMinutes}
-            >
-              {isAnalyzingAudioFile ? "방금 녹음 분석 중" : "방금 녹음 AI 분석"}
-            </button>
-            <span className="muted">{recordingExtension(recordingBlobRef.current?.type ?? "audio/webm").toUpperCase()} · {formatFileSize(recordingFileSize)}</span>
+            <a className="button secondary download-link" href={recordingFileUrl} download={recordingFileName}>녹음 파일 저장</a>
+            <span className="muted">{recordingExtension(recordingFileName).toUpperCase()} · {(recordingFileSize / 1024).toFixed(1)}KB</span>
           </div>
         </div>
       ) : null}
-      <div className="audio-import-row">
-        <input
-          ref={audioFileInputRef}
-          className="audio-file-input"
-          type="file"
-          aria-label="기존 녹음 파일 선택"
-          accept="audio/*,.mp3,.m4a,.wav,.webm,.ogg,.aac,.flac,.mp4"
-          onChange={(event) => {
-            const file = event.target.files?.[0];
-            event.target.value = "";
-            if (file) {
-              void analyzeExistingAudioFile(file);
-            }
-          }}
-        />
-        <button
-          className="button secondary audio-import-button"
-          type="button"
-          onClick={() => audioFileInputRef.current?.click()}
-          disabled={isAnalyzingAudioFile || isGeneratingMinutes || state === "requesting" || state === "recording" || state === "paused"}
-        >
-          {isAnalyzingAudioFile ? "녹음 파일 분석 중" : "기존 녹음 파일 AI 분석"}
-        </button>
-        <span className="muted" role="status" aria-live="polite">{audioImportMessage}</span>
-      </div>
       <p className="muted recording-message">{message}</p>
-      <details className="participant-details">
-        <summary>
-          <span>참여자 설정</span>
-          <small>{participants.length}명 · {participantSummary}</small>
-        </summary>
-        <div className="participant-setup">
-          <label className="participant-count-field">
-            참여 인원
-            <select
-              aria-label="참여자 수"
-              value={participants.length}
-              disabled={!canChangeParticipantCount}
-              onChange={(event) => changeParticipantCount(Number(event.target.value))}
-            >
-              {Array.from({ length: 8 }, (_, index) => index + 1).map((count) => (
-                <option key={count} value={count}>{count}명</option>
-              ))}
-            </select>
-          </label>
-          <div className="participant-name-grid">
-            {participants.map((participant, index) => (
-              <label key={participant.id}>
-                <span>{index + 1}</span>
-                <input
-                  aria-label={`참여자 ${index + 1} 이름`}
-                  value={participant.name}
-                  placeholder={`화자 ${index + 1}`}
-                  onChange={(event) => updateParticipantName(participant.id, event.target.value)}
-                />
-              </label>
-            ))}
-          </div>
-        </div>
-      </details>
       <details className="storage-details">
         <summary>
           <span>로컬 음성 관리</span>
@@ -1363,10 +1022,10 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
               <span style={{ width: `${uploadProgress}%` }} />
             </div>
             <div className="toolbar">
-              <button className="button secondary" type="button" onClick={confirmLocalChunks} disabled={uploadState === "uploading"}>
+              <button className="button secondary" type="button" onClick={() => void confirmLocalChunks()} disabled={uploadState === "confirming"}>
                 {uploadState === "failed" ? "로컬 보관 재확인" : "로컬 음성 보관 확인"}
               </button>
-              <button className="button danger" type="button" aria-label="로컬 원본 음성 삭제" onClick={deleteLocalAudio} disabled={state === "recording" || state === "paused"}>
+              <button className="button danger" type="button" aria-label="로컬 원본 음성 삭제" onClick={() => void deleteLocalAudio()} disabled={state === "recording" || state === "paused"}>
                 원본 삭제
               </button>
             </div>
@@ -1375,7 +1034,9 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             <span>임시 청크 {chunkCount}개</span>
             <span>로컬 확인 {uploadedChunks}개</span>
             <span>진행률 {uploadProgress}%</span>
-            <span>{uploadState === "complete" ? "로컬 보관 확인" : uploadState === "failed" ? "재확인 대기" : state === "error" ? "파일 업로드 대안 필요" : "IndexedDB 로컬 보관"}</span>
+            <span>{storageMode === "memory"
+              ? "메모리 fallback · 즉시 파일 저장 필요"
+              : uploadState === "complete" ? "로컬 보관 확인" : uploadState === "failed" ? "재확인 대기" : "IndexedDB 로컬 보관"}</span>
           </div>
         </div>
       </details>
@@ -1408,10 +1069,22 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             <div>
               <strong>회의록 및 AI 보고서</strong>
               <p className="muted">{minutesMessage}</p>
+              <p className="transcript-save-meta">
+                {isLoadingMinutes
+                  ? "회의록 저장본 확인 중"
+                  : minutesSavedVersion !== null && minutesUpdatedAt
+                    ? `서버 v${minutesSavedVersion} · 최종 수정 ${formatUpdatedAt(minutesUpdatedAt)}`
+                    : "서버 저장 전 · AI 생성 초안"}
+              </p>
             </div>
-            <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || isAnalyzingAudioFile || !analysisAvailable}>
-              {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
-            </button>
+            <div className="toolbar">
+              <button className="button secondary" type="button" onClick={requestMinutesReload} disabled={isLoadingMinutes}>
+                저장된 회의록 불러오기
+              </button>
+              <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
+                {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
+              </button>
+            </div>
           </div>
           <div className="ai-provider-bar">
             <div className="segmented-control" role="group" aria-label="AI 분석 방식">
@@ -1432,12 +1105,27 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
             </div>
             <button className="text-button" type="button" onClick={refreshAiStatus}>연결 다시 확인</button>
           </div>
+          {analysisMode === "gemini" ? (
+            <label className="check-row external-ai-consent-check">
+              <input
+                type="checkbox"
+                aria-label="Gemini 외부 전송 동의"
+                checked={geminiConsentConfirmed}
+                onChange={(event) => setGeminiConsentConfirmed(event.target.checked)}
+              />
+              <span>분석할 최종 전사 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송되지 않으며, AI 생성 초안은 최종 확정 전 서버 DB에 저장되지 않습니다.</span>
+            </label>
+          ) : null}
           <div className={`ai-provider-status ${analysisAvailable ? "ready" : "unavailable"}`} role="status">
-            <strong>{analysisMode === "ollama" ? "로컬 AI" : "Gemini"}</strong>
+            <strong>{aiStatus?.activeProvider === "mock" ? "데모 분석" : analysisMode === "ollama" ? "로컬 AI" : "Gemini"}</strong>
             <span>{selectedAiStatus ? `${selectedAiStatus.model} · ${selectedAiStatus.message}` : aiStatusMessage}</span>
-            {analysisMode === "gemini" && selectedAiStatus?.available ? (
-              <span>분석할 전사 TXT가 Google Gemini API로 전송됩니다.</span>
+            {selectedAiStatus ? (
+              <span>{selectedAiStatus.externalTransmission
+                ? "분석할 최종 전사 TXT가 외부 AI API로 전송됩니다. 원본 음성은 전송되지 않습니다."
+                : "원본 음성과 최종 전사 TXT는 외부 AI로 전송되지 않습니다."}</span>
             ) : null}
+            {selectedAiStatus ? <span>예상 비용 {selectedAiStatus.estimatedCost} · 지연 {selectedAiStatus.expectedLatency} · {selectedAiStatus.qualityProfile}</span> : null}
+            {aiStatus ? <span>분석 실행 {aiStatus.queue.mode === "redis" ? "Redis Queue + worker" : "inline"} · 대기 {aiStatus.queue.lag} · 실패 {aiStatus.queue.failed} · {aiStatus.queue.message}</span> : null}
           </div>
           {minutesDraft ? (
             <div className="minutes-body">
@@ -1485,90 +1173,43 @@ export default function RecordingPanel({ meetingId }: RecordingPanelProps) {
               </label>
               <div className="minutes-footer full-width">
                 <button className="button" type="button" onClick={finalizeMinutesDraft} disabled={isFinalizingMinutes}>
-                  최종 서버 저장 기록 남기기
+                  회의록 최종 확정
                 </button>
                 <p className="muted">{finalRecordMessage}</p>
               </div>
             </div>
           ) : null}
         </section>
-        <section
-          className="live-transcript-editor workspace-pane"
-          data-mobile-active={workspaceView === "transcript"}
-          aria-label="실시간 전사 편집"
-        >
-          <div className="editor-heading pane-heading">
-            <div>
-              <strong>실시간 TXT</strong>
-              <p className="muted">{transcriptMessage}</p>
-            </div>
-            <div className="toolbar">
-              <button className="button secondary" type="button" onClick={addManualTranscriptSegment}>문장 추가</button>
-              <button className="button" type="button" onClick={saveTranscriptDraft}>전사 저장</button>
-            </div>
-          </div>
-          <div className="current-speaker-bar">
-            <span>현재 화자</span>
-            <div className="speaker-choice" role="group" aria-label="현재 화자">
-              {participants.map((participant, index) => (
-                <button
-                  key={participant.id}
-                  type="button"
-                  aria-pressed={activeParticipantId === participant.id}
-                  onClick={() => selectActiveParticipant(participant.id)}
-                >
-                  {participant.name.trim() || `화자 ${index + 1}`}
-                </button>
-              ))}
-            </div>
-          </div>
-          <div className="live-segment-list">
-            {visibleTranscript.map((segment, index) => (
-              <article className="live-segment" key={segment.id}>
-                <div className="live-segment-meta">
-                  <span>{segment.timecode}</span>
-                  <select
-                    className="speaker-select"
-                    aria-label={`화자 선택 ${index + 1}`}
-                    value={segment.speakerId}
-                    onChange={(event) => assignTranscriptSpeaker(segment.id, event.target.value)}
-                  >
-                    {participants.map((participant, participantIndex) => (
-                      <option key={participant.id} value={participant.id}>
-                        {participantIndex + 1}
-                      </option>
-                    ))}
-                  </select>
-                  <input
-                    className="speaker-name-input"
-                    aria-label={`화자 이름 ${index + 1}`}
-                    value={segment.speaker}
-                    onChange={(event) => updateParticipantName(segment.speakerId, event.target.value)}
-                  />
-                  <span>{segment.status === "saved" ? "저장됨" : "수정 중"}</span>
-                  <button
-                    className="icon-button delete-segment-button"
-                    type="button"
-                    title="문장 삭제"
-                    aria-label={`전사 문장 ${index + 1} 삭제`}
-                    onClick={() => deleteTranscriptSegment(segment.id)}
-                  >
-                    ×
-                  </button>
-                </div>
-                <label>
-                  전사 문장 {index + 1}
-                  <textarea
-                    value={segment.text}
-                    onChange={(event) => updateTranscriptSegment(segment.id, event.target.value)}
-                    rows={2}
-                  />
-                </label>
-              </article>
-            ))}
-          </div>
-        </section>
+        <TranscriptEditor
+          active={workspaceView === "transcript"}
+          meetingId={meetingId}
+          transcriptVersion={transcriptVersion}
+          serverReady={transcriptServerReady}
+          participants={participants}
+          segments={visibleTranscript}
+          message={transcriptMessage}
+          saveMeta={isLoadingTranscript
+            ? "서버 저장본 확인 중"
+            : transcriptVersion !== null && transcriptUpdatedAt
+              ? `서버 v${transcriptVersion} · 최종 수정 ${formatUpdatedAt(transcriptUpdatedAt)}`
+              : "서버 저장 전 · 로컬 임시 전사"}
+          isLoading={isLoadingTranscript}
+          canDownload={transcriptVersion !== null}
+          onAdd={addManualTranscriptSegment}
+          onReload={requestServerReload}
+          onDownload={downloadTranscript}
+          onSave={() => void saveTranscriptDraft()}
+          onDelete={deleteTranscriptSegment}
+          onSegmentsChange={updateReviewSegments}
+          onPlaySegment={playTranscriptSegment}
+          onReviewGateChange={setReviewDecisionBlockers}
+        />
       </div>
-    </section>
+      </section>
+    </>
   );
+}
+
+function formatUpdatedAt(value: string): string {
+  return new Intl.DateTimeFormat("ko-KR", { dateStyle: "short", timeStyle: "medium" }).format(new Date(value));
 }

@@ -11,6 +11,11 @@
   },
   "dependencies": {
     "@meetingloop/auth": "workspace:*",
-    "@meetingloop/domain": "workspace:*"
+    "@meetingloop/domain": "workspace:*",
+    "argon2": "^0.43.1",
+    "pg": "^8.16.3"
+  },
+  "devDependencies": {
+    "@types/pg": "^8.15.5"
   }
 }

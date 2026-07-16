@@ -1,6 +1,6 @@
 import { cookies } from "next/headers";
 import { verifySessionToken, type SessionPayload } from "@meetingloop/auth";
-import { getDemoSession } from "@meetingloop/db";
+import { getSession } from "@meetingloop/db";
 
 export const sessionCookieName = "meetingloop_session";
 
@@ -17,14 +17,27 @@ export function getSessionSecret(): string {
 
 export async function getSessionPayload(): Promise<SessionPayload | null> {
   const cookieStore = await cookies();
-  return verifySessionToken(cookieStore.get(sessionCookieName)?.value, getSessionSecret());
+  const tokenPayload = verifySessionToken(cookieStore.get(sessionCookieName)?.value, getSessionSecret());
+  if (!tokenPayload) {
+    return null;
+  }
+
+  const session = await getSession(tokenPayload.userId, tokenPayload.organizationId);
+  if (!session) {
+    return null;
+  }
+
+  return {
+    ...tokenPayload,
+    role: session.membership.role
+  };
 }
 
-export async function getCurrentDemoSession() {
+export async function getCurrentSession() {
   const payload = await getSessionPayload();
   if (!payload) {
     return null;
   }
 
-  return getDemoSession(payload.userId, payload.organizationId);
+  return getSession(payload.userId, payload.organizationId);
 }

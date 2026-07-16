@@ -12,6 +12,7 @@ coverage/
 # Test artifacts
 test-results/
 playwright-report/
+backups/
 
 # Local environment
 .env

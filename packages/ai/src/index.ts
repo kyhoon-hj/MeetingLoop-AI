@@ -1,4 +1,8 @@
 import { z } from "zod";
+import { confirmedTextProviderCapability, type ProviderCapability } from "./provider-capabilities";
+
+export * from "./deterministic";
+export * from "./provider-capabilities";
 
 export const transcriptSegmentResultSchema = z.object({
   sequence: z.number().int().nonnegative(),
@@ -31,24 +35,6 @@ export interface SpeechToTextProvider {
   transcribe(input: { recordingId: string }): Promise<TranscriptSegmentResult[]>;
 }
 
-export interface AudioTranscriptSegment {
-  sequence: number;
-  speakerLabel: string;
-  startMs: number;
-  endMs: number;
-  text: string;
-}
-
-export interface AudioTranscriptionProvider {
-  readonly kind: "mock" | "gemini";
-  readonly model: string;
-  transcribeAudio(input: {
-    audioBase64: string;
-    mimeType: string;
-    participantNames: string[];
-  }): Promise<AudioTranscriptSegment[]>;
-}
-
 export interface MeetingAnalysisProvider {
   analyzeMeeting(input: { meetingId: string; transcript: TranscriptSegmentResult[] }): Promise<MeetingAnalysisResult>;
 }
@@ -77,6 +63,7 @@ export interface GeneratedMinutesDraft {
 }
 
 export interface MinutesProvider {
+  readonly capability: ProviderCapability;
   generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft>;
 }
 
@@ -87,6 +74,7 @@ export type MinutesProviderErrorCode =
   | "AI_PROVIDER_UNAVAILABLE"
   | "AI_MODEL_NOT_FOUND"
   | "AI_RATE_LIMITED"
+  | "AI_TIMEOUT"
   | "AI_RESPONSE_INVALID";
 
 export class MinutesProviderError extends Error {
@@ -115,35 +103,6 @@ const generatedMinutesDraftSchema = z.object({
   risks: z.array(z.string().trim().min(1).max(1000)).max(20),
   openQuestions: z.array(z.string().trim().min(1).max(1000)).max(20)
 });
-
-const generatedAudioTranscriptSchema = z.object({
-  segments: z.array(z.object({
-    speakerLabel: z.string().trim().min(1).max(80),
-    startMs: z.number().int().nonnegative(),
-    endMs: z.number().int().nonnegative(),
-    text: z.string().trim().min(1).max(4000)
-  })).min(1).max(200)
-});
-
-const audioTranscriptJsonSchema = {
-  type: "object",
-  properties: {
-    segments: {
-      type: "array",
-      items: {
-        type: "object",
-        properties: {
-          speakerLabel: { type: "string" },
-          startMs: { type: "integer" },
-          endMs: { type: "integer" },
-          text: { type: "string" }
-        },
-        required: ["speakerLabel", "startMs", "endMs", "text"]
-      }
-    }
-  },
-  required: ["segments"]
-} as const;
 
 const minutesJsonSchema = {
   type: "object",
@@ -219,6 +178,10 @@ async function fetchWithTimeout(
   }
 }
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof Error && error.name === "AbortError";
+}
+
 export class MockSpeechToTextProvider implements SpeechToTextProvider {
   async transcribe(input: { recordingId: string }): Promise<TranscriptSegmentResult[]> {
     void input;
@@ -242,27 +205,6 @@ export class MockSpeechToTextProvider implements SpeechToTextProvider {
         confidence: 0.95
       }
     ];
-  }
-}
-
-export class MockAudioTranscriptionProvider implements AudioTranscriptionProvider {
-  readonly kind = "mock" as const;
-  readonly model = "deterministic-audio-test";
-
-  async transcribeAudio(input: {
-    audioBase64: string;
-    mimeType: string;
-    participantNames: string[];
-  }): Promise<AudioTranscriptSegment[]> {
-    void input.audioBase64;
-    void input.mimeType;
-    return [{
-      sequence: 0,
-      speakerLabel: input.participantNames[0] ?? "화자 1",
-      startMs: 0,
-      endMs: 5000,
-      text: "기존 녹음 파일에서 전사한 테스트 문장입니다."
-    }];
   }
 }
 
@@ -302,6 +244,8 @@ export class MockMeetingAnalysisProvider implements MeetingAnalysisProvider {
 }
 
 export class MockMinutesProvider implements MinutesProvider {
+  readonly capability = confirmedTextProviderCapability("mock-minutes", "demo");
+
   async generateMinutes(input: { meetingId: string; transcript: TranscriptTextSegment[] }): Promise<GeneratedMinutesDraft> {
     const confirmedText = input.transcript.map((segment) => `${segment.speakerLabel}: ${segment.editedText}`).join("\n");
     const firstSegment = input.transcript[0];
@@ -345,6 +289,7 @@ interface OllamaMinutesProviderOptions {
 export class OllamaMinutesProvider implements MinutesProvider {
   readonly kind = "ollama" as const;
   readonly model: string;
+  readonly capability = confirmedTextProviderCapability("ollama-minutes", "real");
   private readonly baseUrl: string;
   private readonly request: typeof fetch;
   private readonly timeoutMs: number;
@@ -373,7 +318,10 @@ export class OllamaMinutesProvider implements MinutesProvider {
           options: { temperature: 0.1 }
         })
       }, this.timeoutMs);
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new MinutesProviderError("AI_TIMEOUT", "로컬 AI 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
+      }
       throw new MinutesProviderError(
         "AI_PROVIDER_UNAVAILABLE",
         "로컬 AI에 연결하지 못했습니다. Ollama가 실행 중인지 확인해 주세요."
@@ -401,143 +349,6 @@ export class OllamaMinutesProvider implements MinutesProvider {
   }
 }
 
-interface GeminiAudioTranscriptionProviderOptions {
-  apiKey?: string | undefined;
-  model?: string | undefined;
-  request?: typeof fetch | undefined;
-  timeoutMs?: number | undefined;
-}
-
-export class GeminiAudioTranscriptionProvider implements AudioTranscriptionProvider {
-  readonly kind = "gemini" as const;
-  readonly model: string;
-  private readonly apiKey: string;
-  private readonly request: typeof fetch;
-  private readonly timeoutMs: number;
-
-  constructor(options: GeminiAudioTranscriptionProviderOptions = {}) {
-    this.apiKey = options.apiKey?.trim() ?? "";
-    this.model = options.model ?? "gemini-3.1-flash-lite";
-    this.request = options.request ?? globalThis.fetch;
-    this.timeoutMs = options.timeoutMs ?? 300_000;
-  }
-
-  async transcribeAudio(input: {
-    audioBase64: string;
-    mimeType: string;
-    participantNames: string[];
-  }): Promise<AudioTranscriptSegment[]> {
-    if (!this.apiKey) {
-      throw new MinutesProviderError(
-        "AI_CONFIGURATION_REQUIRED",
-        "Gemini API 키가 설정되지 않았습니다. GEMINI_API_KEY를 설정해 주세요."
-      );
-    }
-
-    const participantNames = input.participantNames
-      .map((name) => name.trim())
-      .filter(Boolean)
-      .slice(0, 8);
-    const participantContext = participantNames.length > 0
-      ? `참여자 후보: ${participantNames.join(", ")}. 음성이나 대화에서 이름이 명확히 확인되는 경우에만 해당 이름을 사용하세요.`
-      : "참여자 이름 정보가 없습니다.";
-    const prompt = [
-      "이 녹음 파일을 한국어 회의 전사 TXT로 변환하세요.",
-      "서로 다른 목소리를 최대 8명까지 구분하고 같은 목소리에는 일관된 speakerLabel을 사용하세요.",
-      "이름을 확실히 판단할 수 없으면 화자 1, 화자 2처럼 번호로 표기하고 이름을 추측하지 마세요.",
-      "발화를 시간 순서대로 나누고 시작·종료 시각을 밀리초로 반환하세요.",
-      "말한 내용을 요약하거나 보충하지 말고 실제 들리는 발화만 전사하세요.",
-      "겹쳐 말해 구분이 어려운 부분은 들리는 범위만 기록하고 내용을 만들어내지 마세요.",
-      participantContext
-    ].join("\n");
-
-    let response: Response;
-    try {
-      response = await fetchWithTimeout(
-        this.request,
-        `https://generativelanguage.googleapis.com/v1beta/models/${encodeURIComponent(this.model)}:generateContent`,
-        {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": this.apiKey
-          },
-          body: JSON.stringify({
-            contents: [{
-              role: "user",
-              parts: [
-                { inlineData: { mimeType: input.mimeType, data: input.audioBase64 } },
-                { text: prompt }
-              ]
-            }],
-            generationConfig: {
-              responseMimeType: "application/json",
-              responseSchema: audioTranscriptJsonSchema,
-              temperature: 0.1
-            }
-          })
-        },
-        this.timeoutMs
-      );
-    } catch {
-      throw new MinutesProviderError("AI_PROVIDER_UNAVAILABLE", "Gemini가 녹음 파일을 읽지 못했습니다. 네트워크 상태를 확인해 주세요.");
-    }
-
-    if (!response.ok) {
-      const failurePayload = z.object({
-        error: z.object({ message: z.string().optional() }).optional()
-      }).safeParse(await response.json().catch(() => null));
-      const failureDetail = failurePayload.success
-        ? failurePayload.data.error?.message?.trim().slice(0, 300)
-        : undefined;
-      if (response.status === 401 || response.status === 403) {
-        throw new MinutesProviderError("AI_CONFIGURATION_REQUIRED", "Gemini API 키가 올바르지 않거나 오디오 분석 권한이 없습니다.");
-      }
-      if (response.status === 404) {
-        throw new MinutesProviderError("AI_MODEL_NOT_FOUND", `Gemini 모델 ${this.model}에서 오디오를 분석할 수 없습니다.`);
-      }
-      if (response.status === 429) {
-        throw new MinutesProviderError("AI_RATE_LIMITED", "Gemini 무료 사용량 제한에 도달했습니다. 잠시 후 다시 시도해 주세요.");
-      }
-      throw new MinutesProviderError(
-        "AI_PROVIDER_UNAVAILABLE",
-        failureDetail
-          ? `Gemini가 녹음 파일을 처리하지 못했습니다: ${failureDetail}`
-          : "Gemini가 녹음 파일 전사를 생성하지 못했습니다. 파일 형식과 길이를 확인해 주세요."
-      );
-    }
-
-    const payload = z.object({
-      candidates: z.array(z.object({
-        content: z.object({
-          parts: z.array(z.object({ text: z.string().optional() }))
-        })
-      })).min(1)
-    }).safeParse(await response.json());
-    const content = payload.success
-      ? payload.data.candidates[0]?.content.parts.map((part) => part.text ?? "").join("").trim()
-      : "";
-    if (!content) {
-      throw new MinutesProviderError("AI_RESPONSE_INVALID", "Gemini 응답에서 녹음 전사 내용을 찾지 못했습니다.");
-    }
-
-    let transcript: z.infer<typeof generatedAudioTranscriptSchema>;
-    try {
-      transcript = generatedAudioTranscriptSchema.parse(JSON.parse(content));
-    } catch {
-      throw new MinutesProviderError("AI_RESPONSE_INVALID", "Gemini가 유효한 녹음 전사 형식으로 응답하지 않았습니다. 다시 시도해 주세요.");
-    }
-
-    return transcript.segments.map((segment, sequence) => ({
-      sequence,
-      speakerLabel: segment.speakerLabel,
-      startMs: segment.startMs,
-      endMs: Math.max(segment.startMs + 500, segment.endMs),
-      text: segment.text
-    }));
-  }
-}
-
 interface GeminiMinutesProviderOptions {
   apiKey?: string | undefined;
   model?: string | undefined;
@@ -548,6 +359,7 @@ interface GeminiMinutesProviderOptions {
 export class GeminiMinutesProvider implements MinutesProvider {
   readonly kind = "gemini" as const;
   readonly model: string;
+  readonly capability = confirmedTextProviderCapability("gemini-minutes", "real", { externalTransmission: true });
   private readonly apiKey: string;
   private readonly request: typeof fetch;
   private readonly timeoutMs: number;
@@ -590,7 +402,10 @@ export class GeminiMinutesProvider implements MinutesProvider {
         },
         this.timeoutMs
       );
-    } catch {
+    } catch (error) {
+      if (isAbortError(error)) {
+        throw new MinutesProviderError("AI_TIMEOUT", "Gemini 응답 시간이 초과되었습니다. 잠시 후 다시 시도해 주세요.");
+      }
       throw new MinutesProviderError("AI_PROVIDER_UNAVAILABLE", "Gemini에 연결하지 못했습니다. 네트워크 상태를 확인해 주세요.");
     }
 

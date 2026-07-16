@@ -1,5 +1,7 @@
 # CODEX MASTER BUILD LOOP — 회의 음성·회의록·개발 영향 분석 플랫폼
 
+> 데이터 저장 정책은 `docs/DATA_STORAGE_POLICY.md`가 최신 기준이며, 이 문서의 과거 원본 음성 업로드 관련 기록은 현재 정책으로 대체된다.
+
 > 파일명 권장: `CODEX_MASTER_BUILD_LOOP.md`  
 > 저장 위치: 저장소 루트  
 > 기본 언어: 한국어 UI / 한국어 문서 / TypeScript 코드  

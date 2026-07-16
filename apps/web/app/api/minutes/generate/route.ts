@@ -1,71 +1,61 @@
 import { NextResponse } from "next/server";
-import { z } from "zod";
 import { MinutesProviderError } from "@meetingloop/ai";
-import { generateDemoMinutesFromTranscript, saveDemoTranscriptSegments } from "@meetingloop/db";
-import { generateMinutesInputSchema, transcriptSegmentInputSchema } from "@meetingloop/domain";
-import { configuredMinutesProvider } from "../../../ai-config";
+import { recordExternalAiConsent } from "@meetingloop/db";
+import { z } from "zod";
+import { databaseErrorResponse } from "../../../api-errors";
+import { assertRequestScope, maxGenerationRequestBytes, readLimitedJson } from "../../../api-request";
+import { generateMinutesForMeeting, MinutesGenerationInProgressError } from "../../../minutes-generation";
 import { getSessionPayload } from "../../../session";
+import { logUnexpectedServerError } from "../../../server-error";
 
-const generateMinutesRequestSchema = generateMinutesInputSchema.extend({
-  fallbackSegments: z.array(transcriptSegmentInputSchema).optional(),
-  provider: z.enum(["ollama", "gemini"]).default("ollama")
+const requestSchema = z.object({
+  meetingId: z.string().min(1),
+  provider: z.enum(["ollama", "gemini"]).default("ollama"),
+  externalAiConsent: z.boolean().optional(),
+  consentId: z.string().min(8).max(160).regex(/^[A-Za-z0-9._:-]+$/).optional()
+}).superRefine((value, context) => {
+  if (value.provider === "gemini" && (value.externalAiConsent !== true || !value.consentId)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "EXTERNAL_AI_CONSENT_REQUIRED" });
+  }
 });
 
 export async function POST(request: Request) {
   const session = await getSessionPayload();
-  if (!session) {
-    return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
-  }
-
-  const parsed = generateMinutesRequestSchema.safeParse({
-    ...(await request.json()),
-    organizationId: session.organizationId
-  });
-  if (!parsed.success) {
-    return NextResponse.json({ error: "INVALID_INPUT" }, { status: 400 });
-  }
-
-  const configured = configuredMinutesProvider(parsed.data.provider);
-  const generate = () => generateDemoMinutesFromTranscript(session.userId, session.role, parsed.data, async (segments) => configured.provider.generateMinutes({
-    meetingId: parsed.data.meetingId,
-    transcript: segments.map((segment) => ({
-      sequence: segment.sequence,
-      speakerLabel: segment.speakerLabel,
-      editedText: segment.editedText
-    }))
-  }));
-
+  if (!session) return NextResponse.json({ error: "UNAUTHENTICATED" }, { status: 401 });
   try {
-    if (parsed.data.fallbackSegments !== undefined) {
-      if (parsed.data.fallbackSegments.length === 0) {
-        return NextResponse.json({ error: "TRANSCRIPT_REQUIRED" }, { status: 409 });
-      }
-      await saveDemoTranscriptSegments(session.userId, session.role, {
-        organizationId: session.organizationId,
-        meetingId: parsed.data.meetingId,
-        segments: parsed.data.fallbackSegments
+    const body = await readLimitedJson(request, maxGenerationRequestBytes);
+    assertRequestScope(body, { organizationId: session.organizationId });
+    const parsed = requestSchema.safeParse(body);
+    if (!parsed.success) {
+      const consentRequired = parsed.error.issues.some((issue) => issue.message === "EXTERNAL_AI_CONSENT_REQUIRED");
+      return NextResponse.json({ error: consentRequired ? "EXTERNAL_AI_CONSENT_REQUIRED" : "INVALID_INPUT" }, { status: consentRequired ? 428 : 400 });
+    }
+    if (parsed.data.provider === "gemini") {
+      await recordExternalAiConsent(session.userId, {
+        organizationId: session.organizationId, meetingId: parsed.data.meetingId, provider: "gemini",
+        idempotencyKey: parsed.data.consentId!
       });
     }
-
-    const minutes = await generate();
-
-    return NextResponse.json({
-      status: "GENERATED",
-      provider: { kind: configured.kind, model: configured.model },
-      analysisInput: {
-        source: parsed.data.fallbackSegments !== undefined ? "CURRENT_TRANSCRIPT" : "SAVED_TRANSCRIPT",
-        segmentCount: parsed.data.fallbackSegments?.length ?? 0
-      },
-      minutes
+    const generated = await generateMinutesForMeeting({
+      userId: session.userId,
+      organizationId: session.organizationId,
+      meetingId: parsed.data.meetingId,
+      provider: parsed.data.provider
     });
+    return NextResponse.json({ status: "GENERATED", ...generated });
   } catch (error) {
-    if (error instanceof Error && error.message === "TRANSCRIPT_REQUIRED") {
-      return NextResponse.json({ error: "TRANSCRIPT_REQUIRED" }, { status: 409 });
+    if (error instanceof MinutesGenerationInProgressError) {
+      return NextResponse.json({ error: error.message }, { status: 409 });
     }
     if (error instanceof MinutesProviderError) {
-      const status = error.code === "AI_RATE_LIMITED" ? 429 : error.code === "AI_RESPONSE_INVALID" ? 502 : 503;
+      const status = error.code === "AI_RATE_LIMITED" ? 429
+        : error.code === "AI_TIMEOUT" ? 504
+          : error.code === "AI_RESPONSE_INVALID" ? 502 : 503;
       return NextResponse.json({ error: error.code, message: error.message }, { status });
     }
-    throw error;
+    const response = databaseErrorResponse(error);
+    if (response) return response;
+    logUnexpectedServerError("minutes.legacy-generate", error);
+    return NextResponse.json({ error: "INTERNAL_ERROR" }, { status: 500 });
   }
 }

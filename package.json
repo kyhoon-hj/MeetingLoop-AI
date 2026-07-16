@@ -5,11 +5,13 @@
   "packageManager": "pnpm@11.7.0",
   "scripts": {
     "dev": "pnpm --filter @meetingloop/web dev",
+    "dev:3101": "pnpm --filter @meetingloop/web exec next dev --hostname 127.0.0.1 --port 3101",
     "worker:dev": "pnpm --filter @meetingloop/worker dev",
     "lint": "eslint . --max-warnings=0",
     "typecheck": "tsc -b",
     "test": "vitest run --environment node --exclude \"**/*.integration.test.ts\" --exclude \"tests/e2e/**\" --exclude \"**/dist/**\"",
     "test:integration": "vitest run tests/integration --environment node --testTimeout 15000",
+    "test:redis": "vitest run tests/redis --environment node --testTimeout 15000",
     "test:e2e": "node scripts/run-e2e.mjs",
     "build": "pnpm -r build",
     "db:migrate": "pnpm --filter @meetingloop/db db:migrate",

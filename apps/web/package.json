@@ -13,6 +13,7 @@
     "@meetingloop/auth": "workspace:*",
     "@meetingloop/db": "workspace:*",
     "@meetingloop/domain": "workspace:*",
+    "@meetingloop/queue": "workspace:*",
     "@meetingloop/ui": "workspace:*"
   }
 }

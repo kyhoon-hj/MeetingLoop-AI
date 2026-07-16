@@ -1,7 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
   createMockMeetingPipeline,
-  GeminiAudioTranscriptionProvider,
   GeminiMinutesProvider,
   OllamaMinutesProvider
 } from "./index";
@@ -43,43 +42,6 @@ describe("mock meeting pipeline", () => {
 });
 
 describe("real minutes providers", () => {
-  it("transcribes inline audio through Gemini with structured speaker segments", async () => {
-    const request = (async (input: string | URL | Request, init?: RequestInit) => {
-      expect(String(input)).toContain("gemini-3.1-flash-lite:generateContent");
-      expect(new Headers(init?.headers).get("x-goog-api-key")).toBe("secret-key");
-      const body = JSON.parse(String(init?.body)) as {
-        contents: Array<{ parts: Array<{ inlineData?: { mimeType: string; data: string }; text?: string }> }>;
-        generationConfig: { responseMimeType: string; responseSchema: { properties: { segments: unknown } } };
-      };
-      expect(body.contents[0]?.parts[0]?.inlineData).toEqual({ mimeType: "audio/webm", data: "YXVkaW8=" });
-      expect(body.contents[0]?.parts[1]?.text).toContain("김팀장");
-      expect(body.generationConfig.responseMimeType).toBe("application/json");
-      expect(body.generationConfig.responseSchema.properties.segments).toBeDefined();
-      return Response.json({
-        candidates: [{
-          content: {
-            parts: [{ text: JSON.stringify({
-              segments: [{ speakerLabel: "김팀장", startMs: 0, endMs: 3200, text: "금요일까지 견적을 준비하겠습니다." }]
-            }) }]
-          }
-        }]
-      });
-    }) as typeof fetch;
-    const provider = new GeminiAudioTranscriptionProvider({ apiKey: "secret-key", request });
-
-    await expect(provider.transcribeAudio({
-      audioBase64: "YXVkaW8=",
-      mimeType: "audio/webm",
-      participantNames: ["김팀장"]
-    })).resolves.toEqual([{
-      sequence: 0,
-      speakerLabel: "김팀장",
-      startMs: 0,
-      endMs: 3200,
-      text: "금요일까지 견적을 준비하겠습니다."
-    }]);
-  });
-
   it("generates structured minutes through a local Ollama model", async () => {
     const request = (async (input: string | URL | Request, init?: RequestInit) => {
       expect(String(input)).toBe("http://127.0.0.1:11434/api/chat");
@@ -132,6 +94,21 @@ describe("real minutes providers", () => {
 
     await expect(provider.generateMinutes({ meetingId: "meeting-1", transcript })).rejects.toMatchObject({
       code: "AI_CONFIGURATION_REQUIRED"
+    } satisfies Partial<MinutesProviderError>);
+  });
+
+  it("returns a specific timeout error when an AI provider does not respond", async () => {
+    const request = ((_input: string | URL | Request, init?: RequestInit) => new Promise<Response>((_resolve, reject) => {
+      init?.signal?.addEventListener("abort", () => {
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      });
+    })) as typeof fetch;
+    const provider = new OllamaMinutesProvider({ request, timeoutMs: 5 });
+
+    await expect(provider.generateMinutes({ meetingId: "meeting-1", transcript })).rejects.toMatchObject({
+      code: "AI_TIMEOUT"
     } satisfies Partial<MinutesProviderError>);
   });
 });
