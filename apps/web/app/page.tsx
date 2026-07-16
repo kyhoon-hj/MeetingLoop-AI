@@ -45,6 +45,7 @@ export default async function HomePage({ searchParams }: {
   const params = await searchParams;
   const feedback = errorFeedback(params?.error);
   const sessionPayload = await getSessionPayload();
+  const showDemoAccount = process.env.NODE_ENV !== "production" || process.env.ALLOW_DEMO_ACCOUNT_HINTS === "true";
 
   if (sessionPayload) {
     await ensureQuickCaptureMeeting(sessionPayload.userId, sessionPayload.organizationId);
@@ -75,18 +76,20 @@ export default async function HomePage({ searchParams }: {
             <ValidatedForm className="form-grid" action={loginAction}>
               <label>
                 이메일
-                <input name="email" type="email" data-field-label="이메일" defaultValue="admin@example.com" required />
+                <input name="email" type="email" data-field-label="이메일" defaultValue={showDemoAccount ? "admin@example.com" : undefined} required />
               </label>
               <label>
                 비밀번호
-                <input name="password" type="password" data-field-label="비밀번호" defaultValue="ChangeMe123!" required />
+                <input name="password" type="password" data-field-label="비밀번호" defaultValue={showDemoAccount ? "ChangeMe123!" : undefined} required />
               </label>
               <button className="button" type="submit">로그인</button>
             </ValidatedForm>
-            <div className="demo-accounts">
-              <strong>데모 계정</strong>
-              <p>admin@example.com / ChangeMe123!</p>
-            </div>
+            {showDemoAccount ? (
+              <div className="demo-accounts">
+                <strong>데모 계정</strong>
+                <p>admin@example.com / ChangeMe123!</p>
+              </div>
+            ) : null}
             <details className="compact-details">
               <summary>새 조직 만들기</summary>
               <ValidatedForm className="form-grid project-form" action={registerAction}>
