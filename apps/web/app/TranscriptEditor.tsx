@@ -52,6 +52,7 @@ interface TranscriptEditorProps {
   participants: TranscriptParticipantOption[];
   segments: TranscriptEditorSegment[];
   message: string;
+  recognitionMessage: string;
   saveMeta: string;
   isLoading: boolean;
   canDownload: boolean;
@@ -67,6 +68,10 @@ interface TranscriptEditorProps {
 
 const REVIEW_VIEWPORT_HEIGHT = 620;
 const REVIEW_ROW_HEIGHT = 330;
+
+export function newestFirstTranscriptSegments<T>(segments: readonly T[]): T[] {
+  return [...segments].reverse();
+}
 
 function toReviewSegments(segments: TranscriptEditorSegment[]): BrowserReviewSegment[] {
   return segments.map((segment) => ({
@@ -201,11 +206,15 @@ export default function TranscriptEditor(props: TranscriptEditorProps) {
     if (message) setReviewMessage(message);
   }, [props.onSegmentsChange]);
 
-  const windowState = useMemo(
-    () => virtualWindow(reviewState?.segments.length ?? 0, scrollTop, REVIEW_VIEWPORT_HEIGHT, REVIEW_ROW_HEIGHT),
-    [reviewState?.segments.length, scrollTop]
+  const displaySegments = useMemo(
+    () => newestFirstTranscriptSegments(reviewState?.segments ?? []),
+    [reviewState?.segments]
   );
-  const visibleSegments = reviewState?.segments.slice(windowState.start, windowState.end) ?? [];
+  const windowState = useMemo(
+    () => virtualWindow(displaySegments.length, scrollTop, REVIEW_VIEWPORT_HEIGHT, REVIEW_ROW_HEIGHT),
+    [displaySegments.length, scrollTop]
+  );
+  const visibleSegments = displaySegments.slice(windowState.start, windowState.end);
   const reviewed = reviewState?.reviewItems.filter((item) => item.status !== "PENDING").length ?? 0;
   const totalReviews = reviewState?.reviewItems.length ?? 0;
   const suggestions = reviewState ? dictionarySuggestions(reviewState) : [];
@@ -228,6 +237,7 @@ export default function TranscriptEditor(props: TranscriptEditorProps) {
         <div>
           <strong>전사·화자·근거 검토</strong>
           <p className="muted">{props.message}</p>
+          {props.recognitionMessage ? <p className="live-recognition-message" role="status">{props.recognitionMessage}</p> : null}
           <p className="transcript-save-meta">{props.saveMeta}</p>
           <p className="review-local-message">{reviewMessage}</p>
         </div>
@@ -235,7 +245,7 @@ export default function TranscriptEditor(props: TranscriptEditorProps) {
           <button className="button secondary" type="button" onClick={props.onAdd}>문장 추가</button>
           <button className="button secondary" type="button" onClick={props.onReload} disabled={props.isLoading}>서버 저장본 다시 불러오기</button>
           <button className="button secondary" type="button" onClick={props.onDownload} disabled={!props.canDownload}>TXT 다운로드</button>
-          <button className="button" type="button" onClick={props.onSave}>최종 전사 확정</button>
+          <button className="button" type="button" onClick={props.onSave}>TXT 저장</button>
         </div>
       </div>
 
@@ -332,6 +342,7 @@ export default function TranscriptEditor(props: TranscriptEditorProps) {
 
       <div
         className="live-segment-list virtual-transcript-list"
+        aria-label="최신 TXT 문장부터 표시"
         style={{ maxHeight: REVIEW_VIEWPORT_HEIGHT }}
         onScroll={(event) => setScrollTop(event.currentTarget.scrollTop)}
       >

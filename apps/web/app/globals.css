@@ -984,7 +984,7 @@ a {
 
 .recording-workspace-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.06fr) minmax(380px, 0.94fr);
+  grid-template-columns: minmax(280px, 0.58fr) minmax(0, 1.42fr);
   align-items: stretch;
   border-top: 1px solid var(--line-strong);
   background: white;
@@ -992,7 +992,7 @@ a {
 
 .workspace-pane {
   min-width: 0;
-  height: clamp(480px, calc(100vh - 460px), 640px);
+  height: clamp(560px, calc(100vh - 360px), 760px);
 }
 
 .live-transcript-editor {
@@ -1029,6 +1029,13 @@ a {
 
 .review-local-message {
   color: #5b4a19;
+}
+
+.live-recognition-message {
+  border-left: 3px solid #9db4d3;
+  padding-left: 8px;
+  color: #315f9f;
+  font-weight: 650;
 }
 
 .transcript-review-toolbar,
@@ -1306,6 +1313,19 @@ a {
   background: white;
 }
 
+.minutes-draft .editor-heading {
+  display: grid;
+}
+
+.minutes-draft .toolbar,
+.minutes-draft .ai-provider-bar {
+  flex-wrap: wrap;
+}
+
+.minutes-draft .segmented-control {
+  width: 100%;
+}
+
 .minutes-draft p,
 .minutes-draft h3 {
   margin: 4px 0 0;
@@ -1396,7 +1416,7 @@ a {
 
 .minutes-body {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: minmax(0, 1fr);
   gap: 10px;
   border-top: 1px solid var(--line);
   padding-top: 12px;
@@ -1446,6 +1466,11 @@ a {
 .ai-generate-button {
   border-color: var(--info);
   background: var(--info);
+}
+
+.ai-generate-primary {
+  width: 100%;
+  flex: none;
 }
 
 .ai-generate-button:hover:not(:disabled) {

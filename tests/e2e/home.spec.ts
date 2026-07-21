@@ -62,7 +62,11 @@ test("shows a recoverable state while microphone permission is pending", async (
 
   await page.goto("/");
   await page.getByRole("button", { name: "로그인" }).click();
+  const consentResponse = page.waitForResponse((response) =>
+    response.request().method() === "POST" && response.url().includes("/recording-consent")
+  );
   await page.getByRole("button", { name: "녹음 시작" }).click();
+  await consentResponse;
 
   const recorder = page.getByRole("region", { name: "브라우저 녹음" });
   await expect(recorder).toContainText("마이크 권한 확인 중");
@@ -150,9 +154,25 @@ test("keeps a mobile AAC recording in memory when IndexedDB is unavailable", asy
       resume() { this.state = "recording"; }
       stop() { this.state = "inactive"; this.onstop?.(); }
     }
+    class MockSpeechRecognition {
+      continuous = false;
+      interimResults = false;
+      lang = "";
+      onresult: ((event: unknown) => void) | null = null;
+      onerror: ((event: { error: string }) => void) | null = null;
+      onend: (() => void) | null = null;
+      start() {
+        window.setTimeout(() => {
+          this.onerror?.({ error: "no-speech" });
+          this.onend?.();
+        }, 20);
+      }
+      stop() {}
+    }
     const track = { stop() {}, getSettings() { return { channelCount: 1 }; } };
     Object.defineProperty(window, "AudioContext", { configurable: true, value: MockAudioContext });
     Object.defineProperty(window, "MediaRecorder", { configurable: true, value: MockMobileMediaRecorder });
+    Object.defineProperty(window, "SpeechRecognition", { configurable: true, value: MockSpeechRecognition });
     Object.defineProperty(window, "indexedDB", { configurable: true, value: undefined });
     Object.defineProperty(navigator, "mediaDevices", {
       configurable: true,
@@ -164,6 +184,9 @@ test("keeps a mobile AAC recording in memory when IndexedDB is unavailable", asy
   await loginAndWaitForWorkbench(page);
   await page.getByRole("button", { name: "녹음 시작" }).click();
   const recorder = page.getByRole("region", { name: "브라우저 녹음" });
+  const transcriptEditor = page.getByRole("region", { name: "실시간 전사 편집" });
+  await expect(transcriptEditor).toContainText("잠시 말씀이 없어 듣고 있습니다.", { timeout: 5_000 });
+  await expect(page.getByRole("alertdialog")).toHaveCount(0);
   await expect(recorder).toContainText("메모리에 임시 보관 중", { timeout: 5_000 });
   await page.getByRole("button", { name: "종료" }).click();
 
@@ -227,11 +250,11 @@ test("records transcript text and finalizes an AI report in the simplified workb
   const transcriptEditor = await clearTranscriptEditor(page);
   await page.getByRole("button", { name: "문장 추가" }).click();
   await page.getByRole("textbox", { name: "전사 문장 1" }).fill("회의 녹음 후 전사 TXT만 서버에 저장하고 최종 회의록 기록을 남긴다.");
-  await page.getByRole("button", { name: "최종 전사 확정" }).click();
-  await expect(transcriptEditor).toContainText(/최종 전사 1개 문장을 v\d+으로 서버에 확정 저장했습니다./);
+  await page.getByRole("button", { name: "TXT 저장" }).click();
+  await expect(transcriptEditor).toContainText(/TXT 1개 문장을 v\d+으로 서버에 저장했습니다./);
   const saveCompleteDialog = page.getByRole("alertdialog");
-  await expect(saveCompleteDialog).toContainText("최종 전사 저장 완료");
-  await expect(saveCompleteDialog).toContainText(/최종 전사 1개 문장을 v\d+으로 서버에 확정 저장했습니다./);
+  await expect(saveCompleteDialog).toContainText("TXT 저장 완료");
+  await expect(saveCompleteDialog).toContainText(/TXT 1개 문장을 v\d+으로 서버에 저장했습니다./);
   await saveCompleteDialog.getByRole("button", { name: "확인" }).click();
   await expect(page.getByRole("button", { name: "TXT 다운로드" })).toBeEnabled();
   const downloadPromise = page.waitForEvent("download");
@@ -364,14 +387,14 @@ test("shows actionable transcript validation failures", async ({ page }) => {
   await page.getByRole("button", { name: "로그인" }).click();
   const editor = await clearTranscriptEditor(page);
 
-  await page.getByRole("button", { name: "최종 전사 확정" }).click();
+  await page.getByRole("button", { name: "TXT 저장" }).click();
   const dialog = page.getByRole("alertdialog");
   await expect(dialog).toContainText("저장할 전사 문장이 없습니다");
   await dialog.getByRole("button", { name: "확인" }).click();
 
   await page.getByRole("button", { name: "문장 추가" }).click();
   await editor.getByRole("textbox", { name: "전사 문장 1" }).fill("가".repeat(4001));
-  await page.getByRole("button", { name: "최종 전사 확정" }).click();
+  await page.getByRole("button", { name: "TXT 저장" }).click();
   await expect(dialog).toContainText("전사 문장 하나는 최대 4,000자까지 입력할 수 있습니다.");
 });
 
@@ -394,7 +417,7 @@ test("shows a version conflict without overwriting local edits", async ({ page }
     }
     await route.continue();
   });
-  await page.getByRole("button", { name: "최종 전사 확정" }).click();
+  await page.getByRole("button", { name: "TXT 저장" }).click();
   const dialog = page.getByRole("alertdialog");
   await expect(dialog).toContainText("다른 수정 내용이 먼저 저장되었습니다");
   await expect(dialog).toContainText("서버 저장본을 다시 불러온 뒤 수정 내용을 다시 반영해 주세요.");
@@ -419,8 +442,8 @@ test("shows actionable minutes generation and version conflict errors", async ({
   });
   await report.getByRole("button", { name: "AI 보고서 생성" }).click();
   const dialog = page.getByRole("alertdialog");
-  await expect(dialog).toContainText("최종 전사가 필요합니다");
-  await expect(dialog).toContainText("확정된 전사 TXT가 필요합니다");
+  await expect(dialog).toContainText("저장된 TXT가 필요합니다");
+  await expect(dialog).toContainText("저장된 전사 TXT가 필요합니다");
   await dialog.getByRole("button", { name: "확인" }).click();
   await page.unroute("**/api/meetings/*/minutes/generate");
 

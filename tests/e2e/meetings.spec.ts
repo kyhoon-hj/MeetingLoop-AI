@@ -128,6 +128,7 @@ test("lists meetings, pages results, opens detail, and shows controlled read err
     await page.goto("/meetings");
     await page.locator(".meeting-list-card").filter({ hasText: "단계 6 화면 검증 회의" })
       .getByRole("link", { name: "상세 조회" }).click();
+    await expect(page).toHaveURL(new RegExp(`/meetings/${target.meeting.id}$`));
     await expect(page.getByRole("heading", { name: "단계 6 화면 검증 회의" })).toBeVisible();
     await expect(page.getByRole("heading", { name: "참석자" })).toBeVisible();
     await expect(page.getByText("김화면", { exact: true })).toBeVisible();

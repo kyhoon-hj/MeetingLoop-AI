@@ -263,7 +263,7 @@
 - [x] `INT-0806` Playwright desktop/mobile E2E
 - [x] `INT-0807` production build
 - [x] `INT-0808` Docker image build 및 compose smoke
-- [ ] `INT-0809` migration을 실제 운영 DB 복제본에 dry run
+- [x] `INT-0809` migration을 실제 운영 DB 복제본에 dry run
 
 ### P0 수동 인수
 
@@ -275,7 +275,7 @@
 - [ ] `INT-0825` 사전 import/apply와 원문 보존
 - [ ] `INT-0826` HIGH overlap 결정의 evidence 검토/승인/반려
 - [ ] `INT-0827` worker/provider/Redis/DB 실패와 재시도
-- [ ] `INT-0828` web/worker 재시작 후 데이터 유지
+- [x] `INT-0828` web/worker 재시작 후 데이터 유지
 - [ ] `INT-0829` Nginx HTTPS 경유 마이크 및 API 동작
 
 완료 조건:

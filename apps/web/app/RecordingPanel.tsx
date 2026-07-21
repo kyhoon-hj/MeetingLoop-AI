@@ -3,6 +3,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import AudioQualityPanel from "./AudioQualityPanel";
 import FeedbackDialog from "./FeedbackDialog";
+import { liveRecognitionRecoveryPolicy, type LiveRecognitionErrorCode } from "./live-recognition";
 import TranscriptEditor, { type TranscriptEditorSegment, type TranscriptParticipantOption } from "./TranscriptEditor";
 import { recordingExtension } from "./browser-recording";
 import { MeetingApiClientError, meetingApiRequest } from "./meeting-api-client";
@@ -26,12 +27,17 @@ interface LiveTranscriptEvent {
   results: ArrayLike<LiveTranscriptResult>;
 }
 
+interface LiveSpeechRecognitionErrorEvent {
+  error: LiveRecognitionErrorCode;
+  message?: string;
+}
+
 interface LiveSpeechRecognition {
   continuous: boolean;
   interimResults: boolean;
   lang: string;
   onresult: ((event: LiveTranscriptEvent) => void) | null;
-  onerror: (() => void) | null;
+  onerror: ((event: LiveSpeechRecognitionErrorEvent) => void) | null;
   onend: (() => void) | null;
   start(): void;
   stop(): void;
@@ -137,9 +143,9 @@ function apiFailureMessage(payload: ApiErrorPayload | null, fallback: string): s
   const messages: Record<string, string> = {
     UNAUTHENTICATED: "로그인이 만료되었습니다. 다시 로그인해 주세요.",
     INVALID_INPUT: "입력한 내용을 확인한 뒤 다시 시도해 주세요.",
-    TRANSCRIPT_REQUIRED: "확정된 전사 TXT가 필요합니다. 최종 전사 확정을 먼저 진행해 주세요.",
-    TRANSCRIPT_EDIT_FORBIDDEN: "최종 전사를 수정할 권한이 없습니다.",
-    TRANSCRIPT_NOT_FOUND: "서버에 저장된 최종 전사가 없습니다. 전사 문장을 확인한 뒤 최초 확정해 주세요.",
+    TRANSCRIPT_REQUIRED: "저장된 전사 TXT가 필요합니다. 현재 TXT를 먼저 저장해 주세요.",
+    TRANSCRIPT_EDIT_FORBIDDEN: "TXT를 수정할 권한이 없습니다.",
+    TRANSCRIPT_NOT_FOUND: "서버에 저장된 TXT가 없습니다. 전사 문장을 확인한 뒤 저장해 주세요.",
     TRANSCRIPT_VERSION_CONFLICT: "다른 사용자가 먼저 전사를 수정했습니다. 서버 저장본을 다시 불러온 뒤 수정 내용을 다시 반영해 주세요.",
     TRANSCRIPT_REQUEST_TOO_LARGE: "전사 요청 크기가 1MB를 초과했습니다. 문장 수나 문장 길이를 줄여 주세요.",
     TRANSCRIPT_SEGMENT_LIMIT_EXCEEDED: "전사 문장은 한 번에 최대 200개까지 저장할 수 있습니다.",
@@ -220,12 +226,17 @@ export default function RecordingPanel({
   const [feedback, setFeedback] = useState<FeedbackState | null>(null);
   const [transcriptVersion, setTranscriptVersion] = useState<number | null>(null);
   const [transcriptUpdatedAt, setTranscriptUpdatedAt] = useState<string | null>(null);
+  const [recognitionMessage, setRecognitionMessage] = useState("");
   const [isLoadingTranscript, setIsLoadingTranscript] = useState(false);
   const [transcriptServerReady, setTranscriptServerReady] = useState(!meetingId);
   const [confirmServerReload, setConfirmServerReload] = useState(false);
   const [reviewDecisionBlockers, setReviewDecisionBlockers] = useState(0);
   const recognitionRef = useRef<LiveSpeechRecognition | null>(null);
   const recognitionShouldRunRef = useRef(false);
+  const recognitionRetryTimerRef = useRef<number | null>(null);
+  const recognitionRetryDelayRef = useRef(0);
+  const recognitionRetryCountRef = useRef(0);
+  const recognitionSilenceCountRef = useRef(0);
   const liveDraftIdRef = useRef<string | null>(null);
   const minutesPaneRef = useRef<HTMLElement | null>(null);
   const transcriptLoadRequestIdRef = useRef(0);
@@ -361,20 +372,20 @@ export default function RecordingPanel({
       if (response.ok && payload?.transcript === null) {
         setTranscriptVersion(null);
         setTranscriptUpdatedAt(null);
-        setTranscriptMessage("아직 서버에 저장된 최종 전사가 없습니다. 전사를 작성한 뒤 최종 확정해 주세요.");
-        if (notify) showFeedback("서버 저장본이 없습니다", "아직 저장된 최종 전사가 없습니다. 전사를 작성한 뒤 최종 확정해 주세요.", "info");
+        setTranscriptMessage("아직 서버에 저장된 TXT가 없습니다. 전사를 작성한 뒤 저장해 주세요.");
+        if (notify) showFeedback("서버 저장본이 없습니다", "아직 저장된 TXT가 없습니다. 전사를 작성한 뒤 저장해 주세요.", "info");
         return;
       }
       if (!response.ok || !payload?.transcript) {
-        const detail = apiFailureMessage(payload, "서버 최종 전사를 불러오지 못했습니다.");
+        const detail = apiFailureMessage(payload, "서버에 저장된 TXT를 불러오지 못했습니다.");
         setTranscriptMessage(detail);
         showFeedback("서버 저장본을 불러오지 못했습니다", detail);
         return;
       }
       if (!notify && transcriptUserEditedRef.current) return;
       applyServerTranscript(payload.transcript);
-      setTranscriptMessage(`서버에 저장된 최종 전사 v${payload.transcript.version}을 불러왔습니다.`);
-      if (notify) showFeedback("서버 저장본을 불러왔습니다", `최종 전사 v${payload.transcript.version}을 화면에 반영했습니다.`, "info");
+      setTranscriptMessage(`서버에 저장된 TXT v${payload.transcript.version}을 불러왔습니다.`);
+      if (notify) showFeedback("서버 저장본을 불러왔습니다", `TXT v${payload.transcript.version}을 화면에 반영했습니다.`, "info");
     } catch {
       if (requestId !== transcriptLoadRequestIdRef.current) return;
       const detail = "서버에 연결할 수 없습니다. 네트워크와 서버 실행 상태를 확인해 주세요.";
@@ -404,7 +415,7 @@ export default function RecordingPanel({
       if (response.ok && payload?.minutes === null) {
         setMinutesSavedVersion(null);
         setMinutesUpdatedAt(null);
-        setFinalRecordMessage("아직 서버에 저장된 최종 회의록이 없습니다. 최종 전사를 확정한 뒤 AI 회의록을 생성해 주세요.");
+        setFinalRecordMessage("아직 서버에 저장된 최종 회의록이 없습니다. TXT를 저장한 뒤 AI 회의록을 생성해 주세요.");
         if (notify) showFeedback("서버 저장본이 없습니다", "저장된 최종 회의록이 없습니다. AI 보고서를 생성한 뒤 확정해 주세요.", "info");
         return;
       }
@@ -459,6 +470,7 @@ export default function RecordingPanel({
 
   useEffect(() => () => {
     recognitionShouldRunRef.current = false;
+    if (recognitionRetryTimerRef.current !== null) window.clearTimeout(recognitionRetryTimerRef.current);
     recognitionRef.current?.stop();
   }, []);
 
@@ -499,11 +511,17 @@ export default function RecordingPanel({
   }
 
   function startLiveRecognition() {
+    if (recognitionRetryTimerRef.current !== null) {
+      window.clearTimeout(recognitionRetryTimerRef.current);
+      recognitionRetryTimerRef.current = null;
+    }
+    recognitionRetryDelayRef.current = 0;
+    recognitionRetryCountRef.current = 0;
+    recognitionSilenceCountRef.current = 0;
     const Recognition = window.SpeechRecognition ?? window.webkitSpeechRecognition;
     if (!Recognition) {
       const detail = "이 브라우저는 실시간 음성 인식을 지원하지 않습니다. 녹음 후 STT 분석 또는 수동 문장 추가로 정리할 수 있습니다.";
-      setTranscriptMessage(detail);
-      showFeedback("실시간 음성 인식을 사용할 수 없습니다", detail, "warning");
+      setRecognitionMessage(detail);
       return;
     }
 
@@ -522,38 +540,67 @@ export default function RecordingPanel({
           isFinal = isFinal || result?.isFinal === true;
         }
       }
+      recognitionRetryCountRef.current = 0;
+      recognitionSilenceCountRef.current = 0;
+      recognitionRetryDelayRef.current = 0;
       upsertLiveDraft(text, isFinal);
-      setTranscriptMessage(isFinal ? "확정된 전사 문장을 저장했습니다. 필요하면 바로 수정하세요." : "말하는 내용을 실시간 전사 초안으로 받고 있습니다.");
+      setRecognitionMessage("실시간 TXT를 받고 있습니다. 최신 문장이 위에 표시됩니다.");
+      setTranscriptMessage(isFinal ? "인식된 전사 문장을 반영했습니다. 필요하면 바로 수정하세요." : "말하는 내용을 실시간 전사 초안으로 받고 있습니다.");
     };
-    recognition.onerror = () => {
-      const detail = "실시간 전사 중 오류가 발생했습니다. 녹음 파일은 계속 저장되며, 문장은 직접 추가할 수 있습니다.";
-      setTranscriptMessage(detail);
-      showFeedback("실시간 전사를 계속할 수 없습니다", detail, "warning");
+    recognition.onerror = (event) => {
+      if (!recognitionShouldRunRef.current) return;
+      const isSilence = event.error === "no-speech";
+      const isAbort = event.error === "aborted";
+      const attempt = isSilence
+        ? recognitionSilenceCountRef.current + 1
+        : isAbort ? recognitionRetryCountRef.current : recognitionRetryCountRef.current + 1;
+      if (isSilence) recognitionSilenceCountRef.current = attempt;
+      if (!isSilence && !isAbort) recognitionRetryCountRef.current = attempt;
+      const policy = liveRecognitionRecoveryPolicy(event.error, attempt);
+      recognitionRetryDelayRef.current = policy.retryDelayMs;
+      setRecognitionMessage(policy.message);
+      if (!policy.retry) recognitionShouldRunRef.current = false;
     };
     recognition.onend = () => {
       if (recognitionShouldRunRef.current) {
-        try {
-          recognition.start();
-        } catch {
-          recognitionShouldRunRef.current = false;
-          setTranscriptMessage("실시간 음성 인식을 다시 시작하지 못했습니다. 녹음 파일은 계속 저장되며 문장은 직접 추가할 수 있습니다.");
-        }
+        const delay = recognitionRetryDelayRef.current;
+        recognitionRetryDelayRef.current = 0;
+        if (recognitionRetryTimerRef.current !== null) window.clearTimeout(recognitionRetryTimerRef.current);
+        recognitionRetryTimerRef.current = window.setTimeout(() => {
+          recognitionRetryTimerRef.current = null;
+          if (!recognitionShouldRunRef.current) return;
+          try {
+            recognition.start();
+            setRecognitionMessage(delay > 0 ? "실시간 TXT를 다시 연결했습니다. 말씀을 계속해 주세요." : "실시간 TXT를 듣고 있습니다.");
+          } catch {
+            recognitionShouldRunRef.current = false;
+            setRecognitionMessage("실시간 TXT를 다시 시작하지 못했습니다. 녹음은 계속 저장되며 문장은 직접 추가할 수 있습니다.");
+          }
+        }, delay);
       }
     };
     recognitionRef.current = recognition;
     recognitionShouldRunRef.current = true;
     try {
       recognition.start();
+      setRecognitionMessage("실시간 TXT를 듣고 있습니다. 편하게 말씀해 주세요.");
     } catch {
       recognitionShouldRunRef.current = false;
       recognitionRef.current = null;
-      setTranscriptMessage("실시간 음성 인식을 시작하지 못했습니다. 녹음 파일은 계속 저장되며 문장은 직접 추가할 수 있습니다.");
+      setRecognitionMessage("실시간 TXT를 시작하지 못했습니다. 녹음은 계속 저장되며 문장은 직접 추가할 수 있습니다.");
     }
   }
 
   function stopLiveRecognition() {
     recognitionShouldRunRef.current = false;
-    recognitionRef.current?.stop();
+    if (recognitionRetryTimerRef.current !== null) {
+      window.clearTimeout(recognitionRetryTimerRef.current);
+      recognitionRetryTimerRef.current = null;
+    }
+    const recognition = recognitionRef.current;
+    recognitionRef.current = null;
+    recognition?.stop();
+    setRecognitionMessage("");
   }
 
   function addManualTranscriptSegment() {
@@ -629,17 +676,17 @@ export default function RecordingPanel({
       }, { retryCount: 1 });
       transcriptMutationRef.current = null;
       applyServerTranscript(payload.transcript);
-      const detail = `최종 전사 ${segmentsToSave.length}개 문장을 v${payload.transcript.version}으로 서버에 확정 저장했습니다.`;
+      const detail = `TXT ${segmentsToSave.length}개 문장을 v${payload.transcript.version}으로 서버에 저장했습니다.`;
       setTranscriptMessage(detail);
-      showFeedback("최종 전사 저장 완료", detail, "info");
+      showFeedback("TXT 저장 완료", detail, "info");
     } catch (error) {
       if (error instanceof MeetingApiClientError) {
         if (error.status > 0 && error.status < 500) transcriptMutationRef.current = null;
         const detail = apiFailureMessage(error.payload, error.status === 0
           ? "네트워크 연결 후 같은 요청을 다시 시도해 주세요."
-          : "최종 전사 확정에 실패했습니다. 잠시 후 다시 시도해 주세요.");
+          : "TXT 저장에 실패했습니다. 잠시 후 다시 시도해 주세요.");
         setTranscriptMessage(detail);
-        showFeedback(error.status === 409 ? "다른 수정 내용이 먼저 저장되었습니다" : error.status === 0 ? "오프라인 또는 연결 오류" : "최종 전사를 저장하지 못했습니다", detail,
+        showFeedback(error.status === 409 ? "다른 수정 내용이 먼저 저장되었습니다" : error.status === 0 ? "오프라인 또는 연결 오류" : "TXT를 저장하지 못했습니다", detail,
           error.status === 409 || error.status === 0 ? "warning" : "error");
         return;
       }
@@ -651,7 +698,7 @@ export default function RecordingPanel({
 
   async function downloadTranscript() {
     if (!meetingId || transcriptVersion === null) {
-      showFeedback("다운로드할 전사가 없습니다", "최종 전사를 먼저 서버에 확정 저장해 주세요.", "warning");
+      showFeedback("다운로드할 TXT가 없습니다", "TXT를 먼저 서버에 저장해 주세요.", "warning");
       return;
     }
     try {
@@ -716,7 +763,7 @@ export default function RecordingPanel({
         const errorPayload = await response.json().catch(() => null) as ApiErrorPayload | null;
         const detail = apiFailureMessage(errorPayload, "AI 분석 보고서 생성에 실패했습니다. 잠시 후 다시 시도해 주세요.");
         setMinutesMessage(detail);
-        showFeedback(errorPayload?.error === "TRANSCRIPT_REQUIRED" ? "최종 전사가 필요합니다" : "AI 보고서를 생성하지 못했습니다", detail,
+        showFeedback(errorPayload?.error === "TRANSCRIPT_REQUIRED" ? "저장된 TXT가 필요합니다" : "AI 보고서를 생성하지 못했습니다", detail,
           response.status === 409 ? "warning" : "error");
         return;
       }
@@ -852,7 +899,7 @@ export default function RecordingPanel({
       setMinutesSavedVersion(payload.minutes.version);
       setMinutesUpdatedAt(payload.minutes.updatedAt);
       minutesUserEditedRef.current = false;
-      const detail = `회의록을 v${payload.minutes.version}으로 최종 확정했습니다. 서버에는 최종 전사 TXT와 확정 회의록만 저장됩니다.`;
+      const detail = `회의록을 v${payload.minutes.version}으로 최종 확정했습니다. 서버에는 저장된 전사 TXT와 확정 회의록만 저장됩니다.`;
       setFinalRecordMessage(detail);
       showFeedback("회의록 저장 완료", detail, "info");
     } catch (error) {
@@ -933,7 +980,7 @@ export default function RecordingPanel({
       <FeedbackDialog
         open={confirmServerReload}
         title="서버 저장본으로 다시 불러올까요?"
-        message="화면에서 수정 중인 내용은 사라지고 서버에 마지막으로 저장된 최종 전사로 바뀝니다."
+        message="화면에서 수정 중인 내용은 사라지고 서버에 마지막으로 저장된 TXT로 바뀝니다."
         tone="warning"
         confirmLabel="서버 저장본 불러오기"
         cancelLabel="취소"
@@ -1081,9 +1128,6 @@ export default function RecordingPanel({
               <button className="button secondary" type="button" onClick={requestMinutesReload} disabled={isLoadingMinutes}>
                 저장된 회의록 불러오기
               </button>
-              <button className="button ai-generate-button" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
-                {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
-              </button>
             </div>
           </div>
           <div className="ai-provider-bar">
@@ -1105,6 +1149,9 @@ export default function RecordingPanel({
             </div>
             <button className="text-button" type="button" onClick={refreshAiStatus}>연결 다시 확인</button>
           </div>
+          <button className="button ai-generate-button ai-generate-primary" type="button" onClick={generateMinutesDraft} disabled={isGeneratingMinutes || !analysisAvailable}>
+            {isGeneratingMinutes ? "AI 분석 중" : "AI 보고서 생성"}
+          </button>
           {analysisMode === "gemini" ? (
             <label className="check-row external-ai-consent-check">
               <input
@@ -1113,7 +1160,7 @@ export default function RecordingPanel({
                 checked={geminiConsentConfirmed}
                 onChange={(event) => setGeminiConsentConfirmed(event.target.checked)}
               />
-              <span>분석할 최종 전사 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송되지 않으며, AI 생성 초안은 최종 확정 전 서버 DB에 저장되지 않습니다.</span>
+              <span>분석할 저장된 TXT가 Google Gemini API로 전송됩니다. 원본 음성은 전송되지 않으며, AI 생성 초안은 최종 확정 전 서버 DB에 저장되지 않습니다.</span>
             </label>
           ) : null}
           <div className={`ai-provider-status ${analysisAvailable ? "ready" : "unavailable"}`} role="status">
@@ -1121,8 +1168,8 @@ export default function RecordingPanel({
             <span>{selectedAiStatus ? `${selectedAiStatus.model} · ${selectedAiStatus.message}` : aiStatusMessage}</span>
             {selectedAiStatus ? (
               <span>{selectedAiStatus.externalTransmission
-                ? "분석할 최종 전사 TXT가 외부 AI API로 전송됩니다. 원본 음성은 전송되지 않습니다."
-                : "원본 음성과 최종 전사 TXT는 외부 AI로 전송되지 않습니다."}</span>
+                ? "분석할 저장된 TXT가 외부 AI API로 전송됩니다. 원본 음성은 전송되지 않습니다."
+                : "원본 음성과 저장된 TXT는 외부 AI로 전송되지 않습니다."}</span>
             ) : null}
             {selectedAiStatus ? <span>예상 비용 {selectedAiStatus.estimatedCost} · 지연 {selectedAiStatus.expectedLatency} · {selectedAiStatus.qualityProfile}</span> : null}
             {aiStatus ? <span>분석 실행 {aiStatus.queue.mode === "redis" ? "Redis Queue + worker" : "inline"} · 대기 {aiStatus.queue.lag} · 실패 {aiStatus.queue.failed} · {aiStatus.queue.message}</span> : null}
@@ -1188,6 +1235,7 @@ export default function RecordingPanel({
           participants={participants}
           segments={visibleTranscript}
           message={transcriptMessage}
+          recognitionMessage={recognitionMessage}
           saveMeta={isLoadingTranscript
             ? "서버 저장본 확인 중"
             : transcriptVersion !== null && transcriptUpdatedAt
