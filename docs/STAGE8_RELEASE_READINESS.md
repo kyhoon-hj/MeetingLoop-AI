@@ -1,7 +1,9 @@
 # 단계 8 회귀 및 릴리스 준비
 
 작성일: 2026-07-16
-상태: 로컬 release candidate 준비 완료, 실제 서버 배포 전 외부 게이트 대기
+상태: 운영 RDS dry-run 및 `v0.1.1` 배포 완료, 일부 수동 인수와 운영 보안 후속 항목 대기
+
+> 이 문서는 배포 전 release candidate 검증 기록이다. 실제 운영 배포 결과와 최신 판정은 `docs/PRODUCTION_DEPLOYMENT_COMPLETION_REPORT_2026-07-16.md`를 기준으로 한다.
 
 ## 1. 소스 기준선
 
